@@ -11,6 +11,10 @@ class Partner(models.Model):
     partner_type = models.CharField("单位类型", choices=PARTNER_TYPES, max_length=20)
     balance = models.DecimalField("往来余额", max_digits=15, decimal_places=2, default=0)
 
+    class Meta:
+        verbose_name = "合作伙伴"
+        verbose_name_plural = verbose_name
+
     def __str__(self):
         return self.name
 
@@ -22,20 +26,34 @@ class Category(models.Model):
     )
     name = models.CharField("分类名称", max_length=50)
     category_type = models.CharField("分类属性", choices=TYPE_CHOICES, max_length=20)
-    parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children')
+    # 支持无限级分类
+    parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children', verbose_name="上级分类")
+
+    class Meta:
+        verbose_name = "产品分类"
+        verbose_name_plural = verbose_name
 
     def __str__(self):
         return f"{self.name} ({self.get_category_type_display()})"
 
 class Product(models.Model):
     category = models.ForeignKey(Category, on_delete=models.PROTECT, verbose_name="所属分类")
-    # 你的核心逻辑：2026-SH-SD-BK
-    internal_code = models.CharField("内部管理编号", max_length=100, unique=True, help_text="自产件必填，如：2026-SH-SD-BK")
+    # 核心逻辑字段
+    internal_code = models.CharField(
+        "内部管理编号", 
+        max_length=100, 
+        unique=True, 
+        help_text="自产件编号规则：年份-类别-系列-颜色 (例: 2026-SH-SD-BK)"
+    )
     model_name = models.CharField("规格型号", max_length=100)
-    image = models.ImageField("产品图片", upload_to='products/%Y/%m/', blank=True, null=True)
+    image = models.ImageField("产品展示图", upload_to='products/%Y/%m/', blank=True, null=True)
     unit = models.CharField("单位", max_length=10, default="个")
-    stock_quantity = models.DecimalField("当前库存量", max_digits=12, decimal_places=2, default=0)
-    min_stock = models.DecimalField("安全库存预警", max_digits=12, decimal_places=2, default=0)
+    stock_quantity = models.DecimalField("当前库存", max_digits=12, decimal_places=2, default=0)
+    min_stock = models.DecimalField("安全库存预警值", max_digits=12, decimal_places=2, default=0)
+
+    class Meta:
+        verbose_name = "产品物料"
+        verbose_name_plural = verbose_name
 
     def __str__(self):
-        return f"{self.internal_code} | {self.model_name}"
+        return f"[{self.category.name}] {self.internal_code} | {self.model_name}"
