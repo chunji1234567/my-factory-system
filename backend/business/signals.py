@@ -16,13 +16,22 @@ from .models import (
 )
 
 
+def _split_amount(value: Decimal):
+    debit = value if value > 0 else Decimal('0')
+    credit = -value if value < 0 else Decimal('0')
+    return debit, credit
+
+
 def _record_partner_ledger(partner, amount, entry_type, **kwargs):
     delta_value = Decimal(amount or 0)
     if not delta_value:
-        return
-    PartnerLedgerEntry.objects.create(
+        return None
+    debit_amount, credit_amount = _split_amount(delta_value)
+    return PartnerLedgerEntry.objects.create(
         partner=partner,
         amount=delta_value,
+        debit_amount=debit_amount,
+        credit_amount=credit_amount,
         entry_type=entry_type,
         **kwargs,
     )
@@ -142,10 +151,10 @@ def ensure_transaction_ledger(sender, instance, created, **kwargs):
     entry = getattr(instance, 'ledger_entry', None)
 
     if created or entry is None:
-        PartnerLedgerEntry.objects.create(
-            partner=instance.partner,
-            entry_type='FINANCE',
-            amount=instance.amount,
+        _record_partner_ledger(
+            instance.partner,
+            instance.amount,
+            'FINANCE',
             transaction=instance,
             note=note,
         )
@@ -153,17 +162,20 @@ def ensure_transaction_ledger(sender, instance, created, **kwargs):
 
     if entry.partner_id != instance.partner_id:
         entry.delete()
-        PartnerLedgerEntry.objects.create(
-            partner=instance.partner,
-            entry_type='FINANCE',
-            amount=instance.amount,
+        _record_partner_ledger(
+            instance.partner,
+            instance.amount,
+            'FINANCE',
             transaction=instance,
             note=note,
         )
     else:
         entry.amount = instance.amount
+        debit_amount, credit_amount = _split_amount(Decimal(instance.amount or 0))
+        entry.debit_amount = debit_amount
+        entry.credit_amount = credit_amount
         entry.note = note
-        entry.save(update_fields=['amount', 'note'])
+        entry.save(update_fields=['amount', 'debit_amount', 'credit_amount', 'note'])
 
 
 @receiver(pre_save, sender=PartnerLedgerEntry)

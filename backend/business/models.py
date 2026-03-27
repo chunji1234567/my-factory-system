@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models, transaction
 from django.db.models import Q, Sum
 from core.models import Partner, Product
@@ -252,6 +254,8 @@ class PartnerLedgerEntry(models.Model):
     partner = models.ForeignKey(Partner, related_name='ledger_entries', on_delete=models.CASCADE)
     entry_type = models.CharField(max_length=20, choices=ENTRY_TYPES)
     amount = models.DecimalField(max_digits=15, decimal_places=2)
+    debit_amount = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0'))
+    credit_amount = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0'))
     sales_order = models.ForeignKey('SalesOrder', null=True, blank=True, on_delete=models.CASCADE)
     purchase_order = models.ForeignKey('PurchaseOrder', null=True, blank=True, on_delete=models.CASCADE)
     transaction = models.OneToOneField(FinancialTransaction, null=True, blank=True, related_name='ledger_entry', on_delete=models.CASCADE)

@@ -24,10 +24,11 @@ class SalesOrderFilter(django_filters.FilterSet):
     created_from = django_filters.DateFilter(field_name='created_at', lookup_expr='gte')
     created_to = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
     order_no = django_filters.CharFilter(field_name='order_no', lookup_expr='icontains')
+    partner_name = django_filters.CharFilter(field_name='partner__name', lookup_expr='icontains')
 
     class Meta:
         model = SalesOrder
-        fields = ['status', 'partner', 'order_no']
+        fields = ['status', 'partner', 'order_no', 'partner_name']
 
 
 class ReceivingLogFilter(django_filters.FilterSet):
@@ -46,10 +47,12 @@ class ShippingLogFilter(django_filters.FilterSet):
     shipped_from = django_filters.DateFilter(field_name='shipped_at', lookup_expr='gte')
     shipped_to = django_filters.DateFilter(field_name='shipped_at', lookup_expr='lte')
     operator = django_filters.CharFilter(field_name='operator', lookup_expr='icontains')
+    partner_name = django_filters.CharFilter(field_name='sales_item__order__partner__name', lookup_expr='icontains')
+    partner = django_filters.NumberFilter(field_name='sales_item__order__partner')
 
     class Meta:
         model = ShippingLog
-        fields = ['sales_order', 'operator']
+        fields = ['sales_order', 'operator', 'partner_name', 'partner']
 
 
 class StockAdjustmentFilter(django_filters.FilterSet):

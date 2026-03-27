@@ -249,8 +249,74 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  getFinancePartnerDetail(partnerId: number, type: 'receivable' | 'payable') {
-    return apiFetch(`/api/business/finance/partners/${partnerId}/?type=${type}`);
+  getFinancePartnerDetail(
+    partnerId: number,
+    type: 'receivable' | 'payable',
+    options?: { ledgerPage?: number; ledgerPageSize?: number; ledgerFrom?: string | null; ledgerTo?: string | null },
+  ) {
+    const params = new URLSearchParams({ type });
+    if (options?.ledgerPage) {
+      params.set('ledger_page', String(options.ledgerPage));
+    }
+    if (options?.ledgerPageSize) {
+      params.set('ledger_page_size', String(options.ledgerPageSize));
+    }
+    if (options?.ledgerFrom) {
+      params.set('ledger_from', options.ledgerFrom);
+    }
+    if (options?.ledgerTo) {
+      params.set('ledger_to', options.ledgerTo);
+    }
+    return apiFetch(`/api/business/finance/partners/${partnerId}/?${params.toString()}`);
+  },
+  async exportFinancePartnerLedger(
+    partnerId: number,
+    type: 'receivable' | 'payable',
+    options?: { ledgerPage?: number; ledgerPageSize?: number; ledgerFrom?: string | null; ledgerTo?: string | null },
+  ) {
+    if (!authToken) {
+      throw new Error('Missing auth token');
+    }
+    const params = new URLSearchParams({ type });
+    if (options?.ledgerPage) {
+      params.set('ledger_page', String(options.ledgerPage));
+    }
+    if (options?.ledgerPageSize) {
+      params.set('ledger_page_size', String(options.ledgerPageSize));
+    }
+    if (options?.ledgerFrom) {
+      params.set('ledger_from', options.ledgerFrom);
+    }
+    if (options?.ledgerTo) {
+      params.set('ledger_to', options.ledgerTo);
+    }
+    const response = await fetch(
+      `${API_BASE_URL}/api/business/finance/partners/${partnerId}/ledger-export/?${params.toString()}`,
+      {
+        headers: {
+          Accept: 'text/csv',
+          Authorization: `Bearer ${authToken}`,
+        },
+      },
+    );
+    if (!response.ok) {
+      let message = '导出台账失败';
+      try {
+        const text = await response.text();
+        if (text) {
+          try {
+            const data = JSON.parse(text);
+            message = data.detail || text;
+          } catch {
+            message = text;
+          }
+        }
+      } catch {
+        message = '导出台账失败';
+      }
+      throw new Error(message);
+    }
+    return response.blob();
   },
   getFinanceTransactions(params = '') {
     return apiFetch(`/api/business/finance/transactions/${params}`);

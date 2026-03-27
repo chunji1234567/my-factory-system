@@ -4,9 +4,23 @@ interface ProductTableProps {
   products: ProductItem[];
   loading?: boolean;
   title?: string;
+  selectedIds?: Set<number>;
+  onToggleSelect?: (product: ProductItem) => void;
+  quantities?: Record<number, string>;
+  onQuantityChange?: (productId: number, value: string) => void;
 }
 
-export default function ProductTable({ products, loading, title = '产品库存概览' }: ProductTableProps) {
+export default function ProductTable({
+  products,
+  loading,
+  title = '产品库存概览',
+  selectedIds,
+  onToggleSelect,
+  quantities,
+  onQuantityChange,
+}: ProductTableProps) {
+  const selectionEnabled = Boolean(selectedIds && onToggleSelect);
+
   return (
     <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -20,35 +34,66 @@ export default function ProductTable({ products, loading, title = '产品库存�
         <table className="min-w-full divide-y divide-slate-100 text-sm">
           <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
             <tr>
+              {selectionEnabled && <th className="px-4 py-3">选择</th>}
               <th className="px-4 py-3">内部编号</th>
               <th className="px-4 py-3">规格型号</th>
               <th className="px-4 py-3 text-right">库存</th>
-              <th className="px-4 py-3 text-right">预警值</th>
+              {selectionEnabled && <th className="px-4 py-3 text-right">数量</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
             {loading && (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">
+                <td colSpan={selectionEnabled ? 5 : 3} className="px-4 py-6 text-center text-sm text-slate-500">
                   正在加载库存…
                 </td>
               </tr>
             )}
-            {!loading && products.map((product) => (
-              <tr key={product.id}>
-                <td className="px-4 py-3 font-mono text-xs text-slate-500">{product.internalCode}</td>
-                <td className="px-4 py-3">{product.modelName}</td>
-                <td className="px-4 py-3 text-right font-semibold">
-                  {product.stockQuantity.toLocaleString()}
-                </td>
-                <td className="px-4 py-3 text-right text-slate-500">
-                  {product.minStock.toLocaleString()}
-                </td>
-              </tr>
-            ))}
+            {!loading && products.map((product) => {
+              const isLowStock = product.stockQuantity < product.minStock;
+              const isSelected = selectionEnabled ? selectedIds?.has(product.id) : false;
+              return (
+                <tr key={product.id}>
+                  {selectionEnabled && (
+                    <td className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500"
+                        checked={Boolean(isSelected)}
+                        onChange={() => onToggleSelect?.(product)}
+                      />
+                    </td>
+                  )}
+                  <td
+                    className={`px-4 py-3 font-mono text-xs ${
+                      isLowStock ? 'text-rose-600 font-semibold' : 'text-slate-500'
+                    }`}
+                  >
+                    {product.internalCode}
+                  </td>
+                  <td className="px-4 py-3">{product.modelName}</td>
+                  <td className="px-4 py-3 text-right font-semibold">
+                    {product.stockQuantity.toLocaleString()}
+                  </td>
+                  {selectionEnabled && (
+                    <td className="px-4 py-3 text-right">
+                      <input
+                        type="number"
+                        min="0"
+                        disabled={!isSelected}
+                        value={(quantities && quantities[product.id]) ?? ''}
+                        onChange={(evt) => onQuantityChange?.(product.id, evt.target.value)}
+                        className="w-28 rounded-full border border-slate-200 px-3 py-1 text-right disabled:bg-slate-50"
+                        placeholder="数量"
+                      />
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
             {!loading && products.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">
+                <td colSpan={selectionEnabled ? 5 : 3} className="px-4 py-6 text-center text-sm text-slate-500">
                   当前分类暂无产品
                 </td>
               </tr>

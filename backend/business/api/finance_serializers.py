@@ -77,3 +77,5 @@ class FinancePartnerDetailSerializer(serializers.Serializer):
     orders = serializers.ListField(child=serializers.DictField())
     transactions = serializers.ListField(child=serializers.DictField())
     total_transactions = serializers.DecimalField(max_digits=15, decimal_places=2)
+    ledger_entries = serializers.ListField(child=serializers.DictField())
+    ledger_pagination = serializers.DictField()

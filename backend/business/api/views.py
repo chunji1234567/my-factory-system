@@ -1,10 +1,13 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
+import csv
 
 from django.db.models import Sum, Count, Max, F, ExpressionWrapper, DecimalField
+from django.core.paginator import Paginator
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
-from rest_framework import viewsets, mixins, filters
+from rest_framework import viewsets, mixins, filters, renderers
 from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
@@ -54,6 +57,43 @@ from .finance_serializers import (
     FinanceTransactionSerializer,
     FinancePartnerDetailSerializer,
 )
+
+class CSVRenderer(renderers.BaseRenderer):
+    media_type = 'text/csv'
+    format = 'csv'
+    charset = 'utf-8'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+LEDGER_ENTRY_TYPE_LABELS = {
+    'SALES': '销售订单',
+    'PURCHASE': '采购订单',
+    'FINANCE': '财务流水',
+    'ADJUST': '余额调整',
+    'OPENING': '期初余额',
+}
+
+ORDER_ORDERING_FIELDS = {
+    'created_at', '-created_at', 'total_amount', '-total_amount',
+    'paid_amount', '-paid_amount', 'order_no', '-order_no',
+    'status', '-status'
+}
+
+TRANSACTION_ORDERING_FIELDS = {'created_at', '-created_at', 'amount', '-amount'}
+
+
+def parse_positive_int(value, default, max_value=None):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    if number <= 0:
+        return default
+    if max_value and number > max_value:
+        return max_value
+    return number
 
 
 class PurchaseOrderViewSet(mixins.ListModelMixin,
@@ -170,7 +210,7 @@ class ShippingLogViewSet(mixins.ListModelMixin,
     ordering_fields = ['shipped_at', 'quantity_shipped']
 
     def get_queryset(self):
-        return ShippingLog.objects.select_related('sales_item__order', 'sales_item__product')
+        return ShippingLog.objects.select_related('sales_item__order__partner', 'sales_item__product')
 
 
 class StockAdjustmentViewSet(mixins.ListModelMixin,
@@ -287,6 +327,166 @@ class FinancePartnerSummaryView(APIView):
         return parse_date(value)
 
 
+def _format_ledger_source(entry):
+    if entry.sales_order_id:
+        return f'销售单 {entry.sales_order.order_no}'
+    if entry.purchase_order_id:
+        return f'采购单 {entry.purchase_order.order_no}'
+    if entry.transaction_id:
+        return f'财务流水 #{entry.transaction_id}'
+    return '-'
+
+
+def _format_order_items(order):
+    if not order:
+        return ''
+    details = []
+    items = getattr(order, 'items', None)
+    if items is None:
+        return ''
+    for item in items.all():
+        name = item.custom_product_name or getattr(item.product, 'name', '') or '未命名'
+        quantity = item.quantity or 0   
+        price = item.price or Decimal('0')
+        details.append(f"{name}: {quantity} x ¥{price:.2f}")
+    return '; '.join(details)
+
+
+def _compose_entry_note(entry):
+    note = entry.note or ''
+    detail_str = ''
+    if entry.sales_order_id:
+        detail_str = _format_order_items(entry.sales_order)
+    elif entry.purchase_order_id:
+        detail_str = _format_order_items(entry.purchase_order)
+    if detail_str:
+        note = f"{note} | 明细: {detail_str}" if note else f"明细: {detail_str}"
+    return note
+
+
+def _ledger_group_key(entry):
+    if entry.sales_order_id:
+        return ('SALES', entry.sales_order_id)
+    if entry.purchase_order_id:
+        return ('PURCHASE', entry.purchase_order_id)
+    if entry.transaction_id:
+        return ('FINANCE', entry.transaction_id)
+    return ('ENTRY', entry.id)
+
+
+class FinancePartnerLedgerExportView(APIView):
+    permission_classes = [IsAuthenticated, IsManager]
+    renderer_classes = [renderers.JSONRenderer, renderers.BrowsableAPIRenderer, CSVRenderer]
+
+    def get(self, request, partner_id):
+        finance_type = request.query_params.get('type', 'receivable')
+        try:
+            order_model, _, partner_types = FinancePartnerDetailView._get_detail_context(finance_type)
+        except ValueError:
+            return Response({'detail': 'Invalid finance type'}, status=400)
+        partner = get_object_or_404(Partner, pk=partner_id, partner_type__in=partner_types)
+
+        ledger_qs = PartnerLedgerEntry.objects.filter(partner=partner).select_related(
+            'sales_order', 'purchase_order', 'transaction'
+        ).prefetch_related(
+            'sales_order__items__product',
+            'purchase_order__items__product',
+        ).order_by('-created_at')
+
+        ledger_from = FinancePartnerDetailView._parse_date_param(request.query_params.get('ledger_from'))
+        ledger_to = FinancePartnerDetailView._parse_date_param(request.query_params.get('ledger_to'))
+        if ledger_from:
+            ledger_qs = ledger_qs.filter(created_at__date__gte=ledger_from)
+        if ledger_to:
+            ledger_qs = ledger_qs.filter(created_at__date__lte=ledger_to)
+
+        ledger_page_param = request.query_params.get('ledger_page')
+        if ledger_page_param:
+            ledger_page = parse_positive_int(ledger_page_param, 1)
+            ledger_page_size = parse_positive_int(request.query_params.get('ledger_page_size'), 30, max_value=200)
+            paginator = Paginator(ledger_qs, ledger_page_size)
+            entries = paginator.get_page(ledger_page).object_list
+        else:
+            entries = ledger_qs
+
+        export_year = self._parse_year(request.query_params.get('year'))
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        filename = f'partner_{partner.id}_ledger.csv'
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response.write('\ufeff')
+        writer = csv.writer(response)
+
+        writer.writerow(['台账记录'])
+        writer.writerow(['日期', '类型', '借方', '贷方', '净额', '备注', '来源'])
+
+        for entry in entries:
+            entry_type_label = LEDGER_ENTRY_TYPE_LABELS.get(entry.entry_type, entry.entry_type)
+            created_at = entry.created_at.strftime('%Y-%m-%d')
+            source = _format_ledger_source(entry)
+            note = _compose_entry_note(entry)
+            writer.writerow([
+                created_at,
+                entry_type_label,
+                f"{entry.debit_amount:.2f}",
+                f"{entry.credit_amount:.2f}",
+                f"{entry.amount:.2f}",
+                note,
+                source,
+            ])
+
+        writer.writerow([])
+
+        orders = order_model.objects.filter(partner=partner)
+        if export_year:
+            orders = orders.filter(created_at__year=export_year)
+        orders = orders.prefetch_related('items__product')
+
+        writer.writerow(['订单明细'])
+        writer.writerow(['订单号', '状态', '总额', '创建时间', '产品明细'])
+        for order in orders.order_by('-created_at'):
+            total_amount = order.total_amount or Decimal('0')
+            paid_amount = order.paid_amount or Decimal('0')
+            writer.writerow([
+                order.order_no,
+                order.status,
+                f"{total_amount:.2f}",
+                order.created_at.strftime('%Y-%m-%d'),
+                _format_order_items(order),
+            ])
+
+        writer.writerow([])
+
+        transactions = FinancialTransaction.objects.filter(partner=partner)
+        if export_year:
+            transactions = transactions.filter(created_at__year=export_year)
+
+        writer.writerow(['财务流水'])
+        writer.writerow(['金额', '类型', '备注', '时间'])
+        for txn in transactions.order_by('-created_at'):
+            amount = txn.amount or Decimal('0')
+            writer.writerow([
+                f"{amount:.2f}",
+                txn.get_transaction_type_display(),
+                txn.note or '',
+                txn.created_at.strftime('%Y-%m-%d'),
+            ])
+
+        return response
+
+    @staticmethod
+    def _parse_year(value):
+        if not value:
+            return None
+        try:
+            year = int(value)
+        except (TypeError, ValueError):
+            return None
+        if year < 1900 or year > 9999:
+            return None
+        return year
+
+
 class FinancePartnerDetailView(APIView):
     permission_classes = [IsAuthenticated, IsManager]
 
@@ -314,9 +514,8 @@ class FinancePartnerDetailView(APIView):
             output_field=DecimalField(max_digits=15, decimal_places=2)
         )
         outstanding_amount = orders.aggregate(total=Sum(order_outstanding_expr))['total'] or Decimal('0')
-        allowed_order_fields = {'created_at', '-created_at', 'total_amount', '-total_amount', 'paid_amount', '-paid_amount', 'order_no', '-order_no', 'status', '-status'}
         order_ordering = request.query_params.get('order_ordering', '-created_at')
-        if order_ordering not in allowed_order_fields:
+        if order_ordering not in ORDER_ORDERING_FIELDS:
             order_ordering = '-created_at'
         orders = orders.order_by(order_ordering)
         orders_serialized = serializer_class(orders, many=True).data
@@ -328,13 +527,51 @@ class FinancePartnerDetailView(APIView):
             transactions = transactions.filter(created_at__date__gte=txn_from)
         if txn_to:
             transactions = transactions.filter(created_at__date__lte=txn_to)
-        allowed_txn_ordering = {'created_at', '-created_at', 'amount', '-amount'}
         txn_ordering = request.query_params.get('transaction_ordering', '-created_at')
-        if txn_ordering not in allowed_txn_ordering:
+        if txn_ordering not in TRANSACTION_ORDERING_FIELDS:
             txn_ordering = '-created_at'
         transactions = transactions.order_by(txn_ordering)
         transactions_serialized = FinanceTransactionSerializer(transactions, many=True).data
         total_transactions = transactions.aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+        ledger_qs = PartnerLedgerEntry.objects.filter(partner=partner).select_related('sales_order', 'purchase_order', 'transaction').prefetch_related('sales_order__items__product', 'purchase_order__items__product').order_by('-created_at')
+        ledger_from = self._parse_date_param(request.query_params.get('ledger_from'))
+        ledger_to = self._parse_date_param(request.query_params.get('ledger_to'))
+        if ledger_from:
+            ledger_qs = ledger_qs.filter(created_at__date__gte=ledger_from)
+        if ledger_to:
+            ledger_qs = ledger_qs.filter(created_at__date__lte=ledger_to)
+        ledger_page = parse_positive_int(request.query_params.get('ledger_page'), 1)
+        ledger_page_size = parse_positive_int(request.query_params.get('ledger_page_size'), 30, max_value=200)
+        paginator = Paginator(ledger_qs, ledger_page_size)
+        ledger_page_obj = paginator.get_page(ledger_page)
+        ledger_entries = []
+        for entry in ledger_page_obj.object_list:
+            entry_data = {
+                'id': entry.id,
+                'entry_type': entry.entry_type,
+                'amount': entry.amount,
+                'debit_amount': entry.debit_amount,
+                'credit_amount': entry.credit_amount,
+                'note': entry.note,
+                'created_at': entry.created_at,
+            }
+            if entry.sales_order_id:
+                entry_data['sales_order_id'] = entry.sales_order_id
+                entry_data['sales_order_no'] = entry.sales_order.order_no
+            if entry.purchase_order_id:
+                entry_data['purchase_order_id'] = entry.purchase_order_id
+                entry_data['purchase_order_no'] = entry.purchase_order.order_no
+            if entry.transaction_id:
+                entry_data['transaction_id'] = entry.transaction_id
+            ledger_entries.append(entry_data)
+
+        ledger_pagination = {
+            'page': ledger_page_obj.number,
+            'page_size': ledger_page_size,
+            'total_pages': paginator.num_pages,
+            'total_items': paginator.count,
+        }
 
         ledger_balance = partner.ledger_entries.aggregate(total=Sum('amount'))['total'] or Decimal('0')
 
@@ -347,11 +584,14 @@ class FinancePartnerDetailView(APIView):
             'orders': orders_serialized,
             'transactions': transactions_serialized,
             'total_transactions': total_transactions,
+            'ledger_entries': ledger_entries,
+            'ledger_pagination': ledger_pagination,
         }
         serializer = FinancePartnerDetailSerializer(detail_data)
         return Response(serializer.data)
 
-    def _get_detail_context(self, finance_type):
+    @staticmethod
+    def _get_detail_context(finance_type):
         if finance_type == 'receivable':
             return SalesOrder, FinanceOrderSerializer, ['CUSTOMER', 'BOTH']
         if finance_type == 'payable':

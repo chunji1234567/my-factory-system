@@ -18,6 +18,9 @@ export interface ShippingLogResponse {
       model_name: string;
     } | null;
   };
+  partner_name?: string | null;
+  partner_id?: number | null;
+  order_no?: string | null;
 }
 
 export function useShippingLogs(enabled = true) {
@@ -34,7 +37,11 @@ export function useShippingLogs(enabled = true) {
       setLoading(true);
       const response = await api.getShippingLogs();
       const resolved = Array.isArray((response as any).results) ? (response as any).results : response;
-      const normalized: ShippingLogResponse[] = resolved.map((log: any) => ({
+      const normalized: ShippingLogResponse[] = resolved.map((log: any) => {
+        const partnerIdValue = log.partner_id ?? (log.partner ?? null);
+        const parsedPartnerId = partnerIdValue !== null && partnerIdValue !== undefined ? Number(partnerIdValue) : null;
+        const partner_id = Number.isNaN(parsedPartnerId) ? null : parsedPartnerId;
+        return {
         ...log,
         quantity_shipped: Number(log.quantity_shipped ?? 0),
         sales_item_detail: log.sales_item_detail
@@ -44,7 +51,11 @@ export function useShippingLogs(enabled = true) {
               shipped_quantity: Number(log.sales_item_detail.shipped_quantity ?? 0),
             }
           : undefined,
-      }));
+        partner_name: log.partner_name ?? null,
+        partner_id,
+        order_no: log.order_no ?? null,
+      };
+      });
       setData(normalized);
       setError(null);
     } catch (err) {

@@ -241,10 +241,16 @@ class PurchaseOrderEventSerializer(serializers.ModelSerializer):
 
 class ShippingLogSerializer(serializers.ModelSerializer):
     sales_item_detail = SalesOrderItemSerializer(source='sales_item', read_only=True)
+    partner_name = serializers.CharField(source='sales_item.order.partner.name', read_only=True)
+    partner_id = serializers.IntegerField(source='sales_item.order.partner_id', read_only=True)
+    order_no = serializers.CharField(source='sales_item.order.order_no', read_only=True)
 
     class Meta:
         model = ShippingLog
-        fields = ['id', 'sales_item', 'sales_item_detail', 'quantity_shipped', 'tracking_no', 'operator', 'shipped_at']
+        fields = [
+            'id', 'sales_item', 'sales_item_detail', 'quantity_shipped', 'tracking_no',
+            'operator', 'shipped_at', 'partner_name', 'partner_id', 'order_no'
+        ]
         read_only_fields = ['shipped_at']
         extra_kwargs = {'operator': {'required': False}}
 

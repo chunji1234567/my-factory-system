@@ -17,9 +17,27 @@ import { usePartners } from './hooks/usePartners';
 import { panelConfig, type PanelKey } from './types';
 
 const panelKeysList = Object.keys(panelConfig) as PanelKey[];
+const ACTIVE_PANEL_STORAGE_KEY = 'mfs-active-panel';
+
+function getInitialPanel(): PanelKey {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const panelFromUrl = params.get('panel');
+    if (panelFromUrl && panelKeysList.includes(panelFromUrl as PanelKey)) {
+      return panelFromUrl as PanelKey;
+    }
+
+    const storedPanel = window.localStorage.getItem(ACTIVE_PANEL_STORAGE_KEY);
+    if (storedPanel && panelKeysList.includes(storedPanel as PanelKey)) {
+      return storedPanel as PanelKey;
+    }
+  }
+
+  return panelKeysList[0];
+}
 
 function App() {
-  const [activePanel, setActivePanel] = useState<PanelKey>(panelKeysList[0]);
+  const [activePanel, setActivePanel] = useState<PanelKey>(getInitialPanel);
   const panelKeys = useMemo(() => panelKeysList, []);
   const { accessToken, logout, user, userLoading } = useAuth();
   const productsQuery = useProducts(Boolean(accessToken));
@@ -46,6 +64,18 @@ function App() {
       setActivePanel(allowedPanels[0]);
     }
   }, [allowedPanels, activePanel]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    params.set('panel', activePanel);
+    const query = params.toString();
+    const newUrl = `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`;
+    window.history.replaceState({}, '', newUrl);
+    window.localStorage.setItem(ACTIVE_PANEL_STORAGE_KEY, activePanel);
+  }, [activePanel]);
 
   if (!accessToken) {
     return <LoginForm />;

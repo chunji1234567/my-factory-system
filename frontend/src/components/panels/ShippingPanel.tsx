@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import type { SalesOrderResponse } from '../../hooks/useSalesOrders';
-import { useShippingLogs } from '../../hooks/useShippingLogs';
+import { useShippingLogs, ShippingLogResponse } from '../../hooks/useShippingLogs';
 import { api } from '../../api/client';
 import Pagination from '../common/Pagination';
 import StatusBadge from '../common/StatusBadge';
@@ -41,6 +41,11 @@ interface OrderItemOption {
   detail?: string;
 }
 
+interface CustomerOption {
+  id: number;
+  name: string;
+}
+
 export default function ShippingPanel({ orders, ordersLoading, ordersError, onRefreshOrders }: Props) {
   const shippingLogsQuery = useShippingLogs(true);
   const [shippingDrafts, setShippingDrafts] = useState<ShippingEntryDraft[]>([
@@ -52,11 +57,13 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
   const [statusError, setStatusError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [customerFilter, setCustomerFilter] = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
   const [statusPage, setStatusPage] = useState(1);
   const [logPage, setLogPage] = useState(1);
   const [eventModalOrderId, setEventModalOrderId] = useState<number | null>(null);
-  const statusPageSize = 20;
-  const logPageSize = 20;
+  const statusPageSize = 30;
+  const logPageSize = 30;
 
   const orderItems: OrderItemOption[] = useMemo(() => {
     return orders.flatMap((order) =>
@@ -80,6 +87,21 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
           label: `${order.order_no} · ${(order.partner_name ?? `客户#${order.partner}`)}`,
         })),
     [orders],
+  );
+
+  const customerOptions = useMemo<CustomerOption[]>(() => {
+    const map = new Map<number, string>();
+    orders.forEach((order) => {
+      if (!map.has(order.partner)) {
+        map.set(order.partner, order.partner_name ?? `客户#${order.partner}`);
+      }
+    });
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [orders]);
+
+  const customerSuggestions = useMemo(
+    () => buildCustomerSuggestions(customerOptions, customerFilter),
+    [customerOptions, customerFilter],
   );
 
   const itemsByOrder = useMemo(() => {
@@ -111,16 +133,30 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
     return map;
   }, [orders]);
 
+  const normalizedCustomerFilter = customerFilter.trim().toLowerCase();
+
   const filteredOrders = useMemo(() => {
-    if (!statusFilter) {
-      return orders;
-    }
-    return orders.filter((order) => order.status === statusFilter);
-  }, [orders, statusFilter]);
+    return orders.filter((order) => {
+      if (statusFilter && order.status !== statusFilter) {
+        return false;
+      }
+      if (selectedCustomerId && order.partner !== selectedCustomerId) {
+        return false;
+      }
+      if (!selectedCustomerId && normalizedCustomerFilter) {
+        const partnerName = (order.partner_name ?? `客户#${order.partner}`).toLowerCase();
+        const partnerIdStr = String(order.partner);
+        if (!partnerName.includes(normalizedCustomerFilter) && !partnerIdStr.includes(normalizedCustomerFilter)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [orders, statusFilter, selectedCustomerId, normalizedCustomerFilter]);
 
   useEffect(() => {
     setStatusPage(1);
-  }, [statusFilter, orders]);
+  }, [statusFilter, orders, selectedCustomerId, normalizedCustomerFilter]);
 
   useEffect(() => {
     const totalPages = Math.max(1, Math.ceil(filteredOrders.length / statusPageSize));
@@ -134,14 +170,57 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
     return filteredOrders.slice(start, start + statusPageSize);
   }, [filteredOrders, statusPage, statusPageSize]);
 
+  const getLogContext = useCallback(
+    (log: ShippingLogResponse) => {
+      const relatedItem = orderItemMap.get(log.sales_item);
+      const relatedOrder = relatedItem ? orderById.get(relatedItem.orderId) : null;
+      const partnerName =
+        log.partner_name ??
+        relatedOrder?.partner_name ??
+        (relatedOrder ? `客户#${relatedOrder.partner}` : '-');
+      const orderNo = log.order_no ?? relatedOrder?.order_no ?? '-';
+      const partnerId = log.partner_id ?? relatedOrder?.partner ?? null;
+      const itemLabel =
+        log.sales_item_detail?.custom_product_name ??
+        relatedItem?.label ??
+        `明细#${log.sales_item}`;
+      return { partnerName, partnerId, orderNo, itemLabel };
+    },
+    [orderItemMap, orderById],
+  );
+
+  const filteredLogs = useMemo(() => {
+    return shippingLogsQuery.data.filter((log) => {
+      const { partnerName, partnerId } = getLogContext(log);
+      if (selectedCustomerId && partnerId !== selectedCustomerId) {
+        return false;
+      }
+      if (!selectedCustomerId && normalizedCustomerFilter) {
+        const matchesName = partnerName.toLowerCase().includes(normalizedCustomerFilter);
+        const matchesId = partnerId ? String(partnerId).includes(normalizedCustomerFilter) : false;
+        if (!matchesName && !matchesId) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [shippingLogsQuery.data, selectedCustomerId, normalizedCustomerFilter, getLogContext]);
+
   useEffect(() => {
     setLogPage(1);
-  }, [shippingLogsQuery.data]);
+  }, [shippingLogsQuery.data, selectedCustomerId, normalizedCustomerFilter]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filteredLogs.length / logPageSize));
+    if (logPage > totalPages) {
+      setLogPage(totalPages);
+    }
+  }, [filteredLogs.length, logPage, logPageSize]);
 
   const logPagedData = useMemo(() => {
     const start = (logPage - 1) * logPageSize;
-    return shippingLogsQuery.data.slice(start, start + logPageSize);
-  }, [shippingLogsQuery.data, logPage, logPageSize]);
+    return filteredLogs.slice(start, start + logPageSize);
+  }, [filteredLogs, logPage, logPageSize]);
 
   const eventOrder = useMemo(() => {
     if (!eventModalOrderId) {
@@ -256,6 +335,41 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
       {statusError && <p className="text-sm text-rose-600">{statusError}</p>}
       {formError && <p className="text-sm text-rose-600">{formError}</p>}
       {successMessage && <p className="text-sm text-emerald-600">{successMessage}</p>}
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[220px] flex-1">
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">客户筛选</label>
+            <input
+              list="shipping-customers"
+              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-700"
+              placeholder="输入客户名称或 #ID"
+              value={customerFilter}
+              onChange={(event) => {
+                const value = event.target.value;
+                setCustomerFilter(value);
+                const resolved = resolveCustomerId(value, customerOptions);
+                setSelectedCustomerId(resolved);
+              }}
+            />
+            <datalist id="shipping-customers">
+              {customerSuggestions.map((suggestion) => (
+                <option key={suggestion} value={suggestion} />
+              ))}
+            </datalist>
+          </div>
+          <button
+            type="button"
+            className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
+            onClick={() => {
+              setCustomerFilter('');
+              setSelectedCustomerId(null);
+            }}
+          >
+            重置过滤
+          </button>
+        </div>
+      </section>
 
       <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-4">
@@ -527,19 +641,12 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
             </thead>
             <tbody className="divide-y divide-slate-100 bg白 text-slate-700">
               {logPagedData.map((log) => {
-                const relatedItem = orderItemMap.get(log.sales_item);
-                const relatedOrder = relatedItem ? orderById.get(relatedItem.orderId) : null;
-                const partnerName = relatedOrder
-                  ? relatedOrder.partner_name ?? `客户#${relatedOrder.partner}`
-                  : '-';
-                const orderNo = relatedOrder?.order_no ?? '-';
+                const { partnerName, orderNo, itemLabel } = getLogContext(log);
                 return (
                   <tr key={log.id}>
                     <td className="px-4 py-3">{partnerName}</td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">{orderNo}</td>
-                    <td className="px-4 py-3">
-                      {log.sales_item_detail?.custom_product_name ?? relatedItem?.label ?? `明细#${log.sales_item}`}
-                    </td>
+                    <td className="px-4 py-3">{itemLabel}</td>
                     <td className="px-4 py-3">{log.quantity_shipped}</td>
                     <td className="px-4 py-3">{log.tracking_no || '-'}</td>
                     <td className="px-4 py-3">{new Date(log.shipped_at).toLocaleString()}</td>
@@ -550,7 +657,7 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
           </table>
         </div>
         <div className="mt-4">
-          <Pagination page={logPage} pageSize={logPageSize} total={shippingLogsQuery.data.length} onPageChange={setLogPage} />
+          <Pagination page={logPage} pageSize={logPageSize} total={filteredLogs.length} onPageChange={setLogPage} />
         </div>
       </section>
 
@@ -568,4 +675,34 @@ function formatDate(value: string) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function buildCustomerSuggestions(options: CustomerOption[], keyword: string) {
+  const normalized = keyword.trim().toLowerCase();
+  return options
+    .filter((option) => {
+      if (!normalized) return true;
+      return option.name.toLowerCase().includes(normalized) || String(option.id).includes(normalized);
+    })
+    .slice(0, 50)
+    .map((option) => `${option.name} (#${option.id})`);
+}
+
+function resolveCustomerId(value: string, options: CustomerOption[]) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^#?\d+$/.test(trimmed)) {
+    return Number(trimmed.replace('#', ''));
+  }
+  const match = trimmed.match(/#(\d+)/);
+  if (match) {
+    return Number(match[1]);
+  }
+  const exactMatches = options.filter((option) => option.name.toLowerCase() === trimmed.toLowerCase());
+  if (exactMatches.length === 1) {
+    return exactMatches[0].id;
+  }
+  return null;
 }

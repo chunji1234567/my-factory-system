@@ -9,7 +9,29 @@ interface Props {
   onRefresh(): Promise<void> | void;
 }
 
-type DetailView = 'orders' | 'transactions';
+type DetailView = 'orders' | 'transactions' | 'ledger';
+
+type LedgerEntryResponse = {
+  id: number;
+  entry_type: string;
+  amount: string;
+  debit_amount: string;
+  credit_amount: string;
+  note: string;
+  created_at: string;
+  sales_order_id?: number | null;
+  sales_order_no?: string | null;
+  purchase_order_id?: number | null;
+  purchase_order_no?: string | null;
+  transaction_id?: number | null;
+};
+
+type LedgerPagination = {
+  page: number;
+  page_size: number;
+  total_pages: number;
+  total_items: number;
+};
 
 type FinancePartnerDetailResponse = {
   partner_id: number;
@@ -20,6 +42,8 @@ type FinancePartnerDetailResponse = {
   orders: Array<{ id: number; order_no: string; status: string; total_amount: string; paid_amount: string; created_at: string; outstanding_amount: string }>;
   transactions: Array<{ id: number; amount: string; note: string; operator: string; created_at: string }>;
   total_transactions: string;
+  ledger_entries: LedgerEntryResponse[];
+  ledger_pagination: LedgerPagination;
 };
 
 const PARTNER_TYPE_LABEL: Record<string, string> = {
@@ -27,6 +51,27 @@ const PARTNER_TYPE_LABEL: Record<string, string> = {
   SUPPLIER: '供应商',
   BOTH: '客户/供应商',
 };
+
+const LEDGER_ENTRY_TYPE_LABEL: Record<string, string> = {
+  SALES: '销售订单',
+  PURCHASE: '采购订单',
+  FINANCE: '财务流水',
+  ADJUST: '余额调整',
+  OPENING: '期初余额',
+};
+
+function formatLedgerSource(entry: LedgerEntryResponse) {
+  if (entry.sales_order_no) {
+    return `销售单 ${entry.sales_order_no}`;
+  }
+  if (entry.purchase_order_no) {
+    return `采购单 ${entry.purchase_order_no}`;
+  }
+  if (entry.transaction_id) {
+    return `财务流水 #${entry.transaction_id}`;
+  }
+  return '-';
+}
 
 export default function PartnerManagementPanel({ partners, loading, error, onRefresh }: Props) {
   const [name, setName] = useState('');
@@ -40,7 +85,13 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailView, setDetailView] = useState<DetailView>('orders');
+  const [ledgerFilterFrom, setLedgerFilterFrom] = useState('');
+  const [ledgerFilterTo, setLedgerFilterTo] = useState('');
+  const [appliedLedgerFrom, setAppliedLedgerFrom] = useState<string | null>(null);
+  const [appliedLedgerTo, setAppliedLedgerTo] = useState<string | null>(null);
+  const [ledgerExporting, setLedgerExporting] = useState(false);
   const [typeFilter, setTypeFilter] = useState<'ALL' | 'CUSTOMER' | 'SUPPLIER' | 'BOTH'>('ALL');
+  const hasAppliedLedgerFilters = Boolean(appliedLedgerFrom || appliedLedgerTo);
 
   const filteredPartners = useMemo(() => {
     if (typeFilter === 'ALL') {
@@ -79,15 +130,46 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
     return type === 'SUPPLIER' ? 'payable' : 'receivable';
   };
 
-  const openDetail = async (partner: PartnerResponse, view: DetailView = 'orders') => {
+  const openDetail = async (
+    partner: PartnerResponse,
+    view: DetailView = 'orders',
+    options: { ledgerPage?: number; ledgerFrom?: string | null; ledgerTo?: string | null } = {},
+  ) => {
+    const switchingPartner = partner.id !== selectedPartner?.id;
     setSelectedPartner(partner);
     setDetailView(view);
     setDetailError(null);
     setDetailLoading(true);
     setDetail(null);
+    if (switchingPartner) {
+      setLedgerFilterFrom('');
+      setLedgerFilterTo('');
+      setAppliedLedgerFrom(null);
+      setAppliedLedgerTo(null);
+    }
     try {
       const financeType = resolveFinanceType(partner.partner_type);
-      const data = await api.getFinancePartnerDetail(partner.id, financeType);
+      const ledgerFrom = options.ledgerFrom !== undefined ? options.ledgerFrom : appliedLedgerFrom;
+      const ledgerTo = options.ledgerTo !== undefined ? options.ledgerTo : appliedLedgerTo;
+      const ledgerPage = options.ledgerPage ?? 1;
+      const params: {
+        ledgerPage?: number;
+        ledgerFrom?: string;
+        ledgerTo?: string;
+      } = { ledgerPage };
+      if (ledgerFrom) {
+        params.ledgerFrom = ledgerFrom;
+      }
+      if (ledgerTo) {
+        params.ledgerTo = ledgerTo;
+      }
+      const data = await api.getFinancePartnerDetail(partner.id, financeType, params);
+      if (options.ledgerFrom !== undefined) {
+        setAppliedLedgerFrom(options.ledgerFrom || null);
+      }
+      if (options.ledgerTo !== undefined) {
+        setAppliedLedgerTo(options.ledgerTo || null);
+      }
       setDetail(data);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : '加载详情失败');
@@ -100,6 +182,66 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
     setSelectedPartner(null);
     setDetail(null);
     setDetailError(null);
+    setDetailView('orders');
+    setLedgerFilterFrom('');
+    setLedgerFilterTo('');
+    setAppliedLedgerFrom(null);
+    setAppliedLedgerTo(null);
+  };
+
+  const handleExportLedger = async () => {
+    if (!selectedPartner) {
+      return;
+    }
+    try {
+      setLedgerExporting(true);
+      const financeType = resolveFinanceType(selectedPartner.partner_type);
+      const blob = await api.exportFinancePartnerLedger(selectedPartner.id, financeType, {
+        ledgerFrom: appliedLedgerFrom,
+        ledgerTo: appliedLedgerTo,
+      });
+      const partnerName = detail?.partner_name || selectedPartner.name || 'partner';
+      const safeName = partnerName.replace(/[^\w\u4e00-\u9fa5-]+/g, '_');
+      const timestamp = new Date().toISOString().slice(0, 10);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${safeName || 'partner'}_ledger_${timestamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setDetailError(err instanceof Error ? err.message : '导出失败');
+    } finally {
+      setLedgerExporting(false);
+    }
+  };
+
+  const handleApplyLedgerFilters = () => {
+    if (!selectedPartner) {
+      return;
+    }
+    openDetail(selectedPartner, 'ledger', {
+      ledgerPage: 1,
+      ledgerFrom: ledgerFilterFrom || null,
+      ledgerTo: ledgerFilterTo || null,
+    });
+  };
+
+  const handleResetLedgerFilters = () => {
+    if (!selectedPartner) {
+      return;
+    }
+    setLedgerFilterFrom('');
+    setLedgerFilterTo('');
+    setAppliedLedgerFrom(null);
+    setAppliedLedgerTo(null);
+    openDetail(selectedPartner, 'ledger', {
+      ledgerPage: 1,
+      ledgerFrom: null,
+      ledgerTo: null,
+    });
   };
 
   return (
@@ -233,6 +375,12 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
                   >
                     转账记录
                   </button>
+                  <button
+                    className={`rounded-full px-3 py-1 ${detailView === 'ledger' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}
+                    onClick={() => setDetailView('ledger')}
+                  >
+                    台账
+                  </button>
                 </>
               )}
               <button
@@ -304,6 +452,148 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
                   )}
                 </tbody>
               </table>
+            </div>
+          )}
+          {!detailLoading && detail && detailView === 'ledger' && (
+            <div className="mt-4 space-y-4">
+              <div className="flex flex-wrap items-end gap-3 text-sm text-slate-600">
+                <label className="text-sm">
+                  <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">开始日期</span>
+                  <input
+                    type="date"
+                    className="mt-1 rounded-lg border border-slate-200 px-3 py-1 text-sm"
+                    value={ledgerFilterFrom}
+                    onChange={(event) => setLedgerFilterFrom(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm">
+                  <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">结束日期</span>
+                  <input
+                    type="date"
+                    className="mt-1 rounded-lg border border-slate-200 px-3 py-1 text-sm"
+                    value={ledgerFilterTo}
+                    onChange={(event) => setLedgerFilterTo(event.target.value)}
+                  />
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 disabled:opacity-50"
+                    onClick={handleApplyLedgerFilters}
+                    disabled={!selectedPartner || detailLoading}
+                  >
+                    筛选
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 disabled:opacity-50"
+                    onClick={handleResetLedgerFilters}
+                    disabled={
+                      (!ledgerFilterFrom && !ledgerFilterTo && !hasAppliedLedgerFilters) || !selectedPartner || detailLoading
+                    }
+                  >
+                    重置
+                  </button>
+                </div>
+              </div>
+              <div className="overflow-hidden rounded-xl border border-slate-100">
+                <table className="min-w-full divide-y divide-slate-100 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">日期</th>
+                      <th className="px-4 py-3">类型</th>
+                      <th className="px-4 py-3 text-right">借方</th>
+                      <th className="px-4 py-3 text-right">贷方</th>
+                      <th className="px-4 py-3 text-right">净额</th>
+                      <th className="px-4 py-3">备注</th>
+                      <th className="px-4 py-3">来源</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
+                    {detail.ledger_entries.map((entry) => {
+                      const debit = Number(entry.debit_amount);
+                      const credit = Number(entry.credit_amount);
+                      const net = Number(entry.amount);
+                      const netColor = net >= 0 ? 'text-emerald-600' : 'text-rose-600';
+                      return (
+                        <tr key={entry.id}>
+                          <td className="px-4 py-3 text-xs text-slate-500">{new Date(entry.created_at).toLocaleString()}</td>
+                          <td className="px-4 py-3">{LEDGER_ENTRY_TYPE_LABEL[entry.entry_type] || entry.entry_type}</td>
+                          <td className="px-4 py-3 text-right">{debit ? `¥ ${debit.toFixed(2)}` : '-'}</td>
+                          <td className="px-4 py-3 text-right">{credit ? `¥ ${credit.toFixed(2)}` : '-'}</td>
+                          <td className={`px-4 py-3 text-right font-semibold ${netColor}`}>
+                            {net ? `¥ ${Math.abs(net).toFixed(2)}` : '-'}
+                          </td>
+                          <td className="px-4 py-3">{entry.note || '-'}</td>
+                          <td className="px-4 py-3">{formatLedgerSource(entry)}</td>
+                        </tr>
+                      );
+                    })}
+                    {!detail.ledger_entries.length && (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-4 text-center text-sm text-slate-500">
+                          暂无台账记录。
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
+                <span>
+                  第 {detail.ledger_pagination.page} / {detail.ledger_pagination.total_pages} 页 ，
+                  共 {detail.ledger_pagination.total_items} 条
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 disabled:opacity-50"
+                    onClick={handleExportLedger}
+                    disabled={ledgerExporting || detailLoading}
+                  >
+                    {ledgerExporting ? '导出中…' : '导出台账'}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-200 px-3 py-1 disabled:opacity-50"
+                    onClick={() =>
+                      selectedPartner &&
+                      openDetail(
+                        selectedPartner,
+                        'ledger',
+                        {
+                          ledgerPage: Math.max(detail.ledger_pagination.page - 1, 1),
+                        },
+                      )
+                    }
+                    disabled={detail.ledger_pagination.page <= 1 || detailLoading}
+                  >
+                    上一页
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-slate-200 px-3 py-1 disabled:opacity-50"
+                    onClick={() =>
+                      selectedPartner &&
+                      openDetail(
+                        selectedPartner,
+                        'ledger',
+                        {
+                          ledgerPage: Math.min(
+                            detail.ledger_pagination.page + 1,
+                            detail.ledger_pagination.total_pages,
+                          ),
+                        },
+                      )
+                    }
+                    disabled={
+                      detail.ledger_pagination.page >= detail.ledger_pagination.total_pages || detailLoading
+                    }
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </section>

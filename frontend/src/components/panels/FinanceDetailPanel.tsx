@@ -404,37 +404,57 @@ export default function FinanceDetailPanel() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
-              {filteredTransactions.map((txn) => (
-                <tr key={txn.id}>
-                  <td className="px-4 py-3">
-                    <div className="font-semibold text-slate-900">{txn.partner_name || `合作方#${txn.partner}`}</div>
-                    <div className="text-xs text-slate-500">ID: {txn.partner}</div>
-                  </td>
-                  <td className={`px-4 py-3 text-right font-bold ${txn.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    <div>{txn.amount >= 0 ? '+' : '-'}¥ {Math.abs(txn.amount).toFixed(2)}</div>
-                    <div className="text-xs text-slate-500">{TRANSACTION_TYPE_LABELS[txn.transaction_type]}</div>
-                  </td>
-                  <td className="px-4 py-3">{txn.note || '-'}</td>
-                  <td className="px-4 py-3">{txn.operator || '-'}</td>
-                  <td className="px-4 py-3 text-xs text-slate-500">{new Date(txn.created_at).toLocaleString()}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-2 text-xs font-semibold">
-                      <button
-                        className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 hover:bg-slate-50"
-                        onClick={() => startEdit(txn.id)}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        className="rounded-full border border-rose-200 px-3 py-1 text-rose-600 hover:bg-rose-50"
-                        onClick={() => handleDelete(txn.id)}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {filteredTransactions.map((txn) => {
+                const isAdjust = txn.transaction_type === 'ADJUST';
+                const displayAmount = isAdjust ? txn.amount : Math.abs(txn.amount);
+                const displaySign = isAdjust
+                  ? txn.amount >= 0
+                    ? '+'
+                    : '-'
+                  : txn.transaction_type === 'PAYMENT'
+                  ? '-'
+                  : '+';
+                const amountColor = isAdjust
+                  ? txn.amount >= 0
+                    ? 'text-emerald-600'
+                    : 'text-rose-600'
+                  : txn.transaction_type === 'PAYMENT'
+                  ? 'text-rose-600'
+                  : 'text-emerald-600';
+                return (
+                  <tr key={txn.id}>
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-slate-900">{txn.partner_name || `合作方#${txn.partner}`}</div>
+                      <div className="text-xs text-slate-500">ID: {txn.partner}</div>
+                    </td>
+                    <td className={`px-4 py-3 text-right font-bold ${amountColor}`}>
+                      <div>
+                        {displaySign}¥ {Math.abs(displayAmount).toFixed(2)}
+                      </div>
+                      <div className="text-xs text-slate-500">{TRANSACTION_TYPE_LABELS[txn.transaction_type]}</div>
+                    </td>
+                    <td className="px-4 py-3">{txn.note || '-'}</td>
+                    <td className="px-4 py-3">{txn.operator || '-'}</td>
+                    <td className="px-4 py-3 text-xs text-slate-500">{new Date(txn.created_at).toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-2 text-xs font-semibold">
+                        <button
+                          className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 hover:bg-slate-50"
+                          onClick={() => startEdit(txn.id)}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="rounded-full border border-rose-200 px-3 py-1 text-rose-600 hover:bg-rose-50"
+                          onClick={() => handleDelete(txn.id)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
               {!filteredTransactions.length && (
                 <tr>
                   <td colSpan={6} className="px-4 py-4 text-center text-sm text-slate-500">

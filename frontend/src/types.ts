@@ -39,3 +39,11 @@ export const panelConfig = {
 } as const;
 
 export type PanelKey = keyof typeof panelConfig;
+
+export type StockAdjustmentType = 'MANUAL_IN' | 'MANUAL_OUT' | 'PRODUCE_IN';
+
+export const stockAdjustmentOptions = [
+  { value: 'MANUAL_IN', label: '入库/盘盈', shortLabel: '入库' },
+  { value: 'MANUAL_OUT', label: '出库/盘亏', shortLabel: '出库' },
+  { value: 'PRODUCE_IN', label: '生产入库', shortLabel: '生产入库' },
+] as const satisfies ReadonlyArray<{ value: StockAdjustmentType; label: string; shortLabel: string }>;

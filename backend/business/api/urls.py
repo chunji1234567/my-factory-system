@@ -10,6 +10,7 @@ from .views import (
     FinancialTransactionViewSet,
     FinancePartnerSummaryView,
     FinancePartnerDetailView,
+    FinancePartnerLedgerExportView,
     CustomerPreferredProductViewSet,
 )
 
@@ -26,4 +27,5 @@ urlpatterns = [
     path('', include(router.urls)),
     path('finance/partners/', FinancePartnerSummaryView.as_view(), name='finance-partner-summary'),
     path('finance/partners/<int:partner_id>/', FinancePartnerDetailView.as_view(), name='finance-partner-detail'),
+    path('finance/partners/<int:partner_id>/ledger-export/', FinancePartnerLedgerExportView.as_view(), name='finance-partner-ledger-export'),
 ]

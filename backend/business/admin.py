@@ -78,7 +78,7 @@ class CustomerPreferredProductAdmin(admin.ModelAdmin):
 
 @admin.register(PartnerLedgerEntry)
 class PartnerLedgerEntryAdmin(admin.ModelAdmin):
-    list_display = ('partner', 'entry_type', 'amount', 'note', 'created_at')
+    list_display = ('partner', 'entry_type', 'amount', 'debit_amount', 'credit_amount', 'note', 'created_at')
     list_filter = ('entry_type', 'partner')
     search_fields = ('partner__name', 'note')
     readonly_fields = ('created_at',)
