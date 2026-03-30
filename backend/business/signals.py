@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import F, Sum
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
@@ -43,21 +44,22 @@ def _record_partner_ledger(partner, amount, entry_type, **kwargs):
 @receiver([post_save, post_delete], sender=SalesOrderItem)
 def update_sales_order_total(sender, instance, **kwargs):
     """当销售明细变动时，自动重新计算订单总额"""
-    order = instance.order
-    prev_total = order.total_amount or Decimal('0')
-    res = order.items.aggregate(total=Sum(F('price') * F('quantity')))
-    new_total = res['total'] or Decimal('0')
-    if prev_total == new_total:
-        return
-    order.total_amount = new_total
-    order.save(update_fields=['total_amount'])
-    _record_partner_ledger(
-        order.partner,
-        new_total - prev_total,
-        'SALES',
-        sales_order=order,
-        note=f'销售订单 {order.order_no}',
-    )
+    with transaction.atomic():
+        order = SalesOrder.objects.select_for_update().get(pk=instance.order_id)
+        prev_total = order.total_amount or Decimal('0')
+        res = order.items.aggregate(total=Sum(F('price') * F('quantity')))
+        new_total = res['total'] or Decimal('0')
+        if prev_total == new_total:
+            return
+        order.total_amount = new_total
+        order.save(update_fields=['total_amount'])
+        _record_partner_ledger(
+            order.partner,
+            new_total - prev_total,
+            'SALES',
+            sales_order=order,
+            note=f'销售订单 {order.order_no}',
+        )
 
 
 @receiver([post_save, post_delete], sender=PurchaseOrderItem)

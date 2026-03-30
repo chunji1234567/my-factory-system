@@ -19,12 +19,29 @@ interface Props {
 }
 
 interface SalesItemDraft {
+  id: number | null;
   category: string;
   product: string;
   customName: string;
   detailDescription: string;
   price: string;
   quantity: string;
+  shippedQuantity: number;
+}
+
+type SalesItemEditableField = 'category' | 'product' | 'customName' | 'detailDescription' | 'price' | 'quantity';
+
+function createEmptyItemDraft(): SalesItemDraft {
+  return {
+    id: null,
+    category: '',
+    product: '',
+    customName: '',
+    detailDescription: '',
+    price: '',
+    quantity: '',
+    shippedQuantity: 0,
+  };
 }
 
 type SalesStatus = (typeof STATUS_OPTIONS)[number]['value'];
@@ -35,7 +52,6 @@ const STATUS_OPTIONS = [
   { value: 'PRODUCING', label: '生产中' },
   { value: 'SHIPPED', label: '已发货' },
   { value: 'COMPLETED', label: '已完成' },
-  { value: 'PENDING', label: '待处理' },
 ] as const;
 const EVENT_TYPES = [
   { value: 'SHIPPING', label: '发货记录' },
@@ -63,9 +79,8 @@ export default function SalesOrdersPanel({
   const [draftId, setDraftId] = useState<number | null>(null);
   const [customerField, setCustomerField] = useState('');
   const [statusField, setStatusField] = useState<SalesStatus>('ORDERED');
-  const [itemDrafts, setItemDrafts] = useState<SalesItemDraft[]>([
-    { category: '', product: '', customName: '', detailDescription: '', price: '', quantity: '' },
-  ]);
+  const [itemDrafts, setItemDrafts] = useState<SalesItemDraft[]>([createEmptyItemDraft()]);
+  const [originalItemDrafts, setOriginalItemDrafts] = useState<SalesItemDraft[] | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSaving, setFormSaving] = useState(false);
   const [eventModalOrderId, setEventModalOrderId] = useState<number | null>(null);
@@ -122,6 +137,15 @@ export default function SalesOrdersPanel({
     return grouped;
   }, [products]);
 
+  const removedItemsWithShipping = useMemo(() => {
+    if (!originalItemDrafts) {
+      return [] as SalesItemDraft[];
+    }
+    const currentIds = new Set(itemDrafts.map((item) => item.id).filter((id): id is number => id != null));
+    return originalItemDrafts.filter((item) => item.id != null && item.shippedQuantity > 0 && !currentIds.has(item.id));
+  }, [itemDrafts, originalItemDrafts]);
+  const showShippingWarning = modalMode === 'edit' && removedItemsWithShipping.length > 0;
+
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
       if (statusFilter && order.status !== statusFilter) {
@@ -158,7 +182,8 @@ export default function SalesOrdersPanel({
     setDraftId(null);
     setCustomerField('');
     setStatusField('ORDERED');
-    setItemDrafts([{ category: '', product: '', customName: '', detailDescription: '', price: '', quantity: '' }]);
+    setItemDrafts([createEmptyItemDraft()]);
+    setOriginalItemDrafts(null);
     setFormError(null);
   };
 
@@ -167,9 +192,11 @@ export default function SalesOrdersPanel({
     setDraftId(order.id);
     setCustomerField(formatPartner(order.partner_name, order.partner));
     setStatusField((order.status as SalesStatus) ?? 'ORDERED');
-    setItemDrafts(
+    const mappedItems =
       order.items.length
         ? order.items.map((item) => ({
+            id: item.id,
+            shippedQuantity: Number(item.shipped_quantity ?? 0),
             category:
               item.product_detail?.category_detail?.id != null
                 ? String(item.product_detail.category_detail.id)
@@ -180,8 +207,9 @@ export default function SalesOrdersPanel({
             price: String(item.price ?? ''),
             quantity: String(item.quantity ?? ''),
           }))
-        : [{ category: '', product: '', customName: '', detailDescription: '', price: '', quantity: '' }],
-    );
+        : [createEmptyItemDraft()];
+    setItemDrafts(mappedItems);
+    setOriginalItemDrafts(mappedItems.map((item) => ({ ...item })));
     setFormError(null);
   };
 
@@ -207,7 +235,7 @@ export default function SalesOrdersPanel({
     setCustomerField(value);
   };
 
-  const handleItemChange = (index: number, field: keyof SalesItemDraft, value: string) => {
+  const handleItemChange = (index: number, field: SalesItemEditableField, value: string) => {
     setItemDrafts((prev) => {
       const next = [...prev];
       const updated = { ...next[index], [field]: value };
@@ -220,10 +248,7 @@ export default function SalesOrdersPanel({
   };
 
   const addItemRow = () => {
-    setItemDrafts((prev) => [
-      ...prev,
-      { category: '', product: '', customName: '', detailDescription: '', price: '', quantity: '' },
-    ]);
+    setItemDrafts((prev) => [...prev, createEmptyItemDraft()]);
   };
 
   const removeItemRow = (index: number) => {
@@ -262,17 +287,36 @@ export default function SalesOrdersPanel({
       return;
     }
     const itemsPayload = itemDrafts
-      .map((item) => ({
-        product: item.product ? Number(item.product) : null,
-        custom_product_name: item.customName || '未命名产品',
-        detail_description: item.detailDescription,
-        price: Number(item.price),
-        quantity: Number(item.quantity),
-      }))
+      .map((item) => {
+        const payload: {
+          id?: number;
+          product: number | null;
+          custom_product_name: string;
+          detail_description: string;
+          price: number;
+          quantity: number;
+        } = {
+          product: item.product ? Number(item.product) : null,
+          custom_product_name: item.customName || '未命名产品',
+          detail_description: item.detailDescription,
+          price: Number(item.price),
+          quantity: Number(item.quantity),
+        };
+        if (item.id != null) {
+          payload.id = item.id;
+        }
+        return payload;
+      })
       .filter((item) => item.quantity && item.price);
     if (!itemsPayload.length) {
       setFormError('请至少添加一条明细');
       return;
+    }
+    if (modalMode === 'edit' && removedItemsWithShipping.length) {
+      const confirmed = window.confirm('删除包含发货记录的明细会同时删除相关发货记录，确认继续？');
+      if (!confirmed) {
+        return;
+      }
     }
     try {
       setFormSaving(true);
@@ -582,6 +626,11 @@ export default function SalesOrdersPanel({
                     添加明细
                   </button>
                 </div>
+                {showShippingWarning && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    提醒：已发货的明细被删除后，其关联发货记录也会被删除，请谨慎操作。
+                  </div>
+                )}
                 <datalist id="sales-preferred-models">
                   {preferredModelOptions.map((option) => (
                     <option key={option} value={option} />

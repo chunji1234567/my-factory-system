@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
 from rest_framework import serializers
 
@@ -40,9 +41,11 @@ class MonetaryMaskMixin:
 
 
 class PurchaseOrderItemWriteSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
+
     class Meta:
         model = PurchaseOrderItem
-        fields = ['product', 'price', 'quantity']
+        fields = ['id', 'product', 'price', 'quantity']
 
 
 class PurchaseOrderItemSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
@@ -83,35 +86,70 @@ class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context.get('request')
         items_data = validated_data.pop('items_payload', [])
-        if not validated_data.get('operator') and request and request.user.is_authenticated:
-            validated_data['operator'] = request.user.get_full_name() or request.user.get_username()
-        if not validated_data.get('order_no'):
-            validated_data['order_no'] = self._generate_order_no()
-        order = PurchaseOrder.objects.create(**validated_data)
-        for item in items_data:
-            PurchaseOrderItem.objects.create(order=order, **item)
+        with transaction.atomic():
+            if not validated_data.get('operator') and request and request.user.is_authenticated:
+                validated_data['operator'] = request.user.get_full_name() or request.user.get_username()
+            if not validated_data.get('order_no'):
+                validated_data['order_no'] = self._generate_order_no()
+            order = PurchaseOrder.objects.create(**validated_data)
+            for item in items_data:
+                PurchaseOrderItem.objects.create(order=order, **item)
         return order
 
     def update(self, instance, validated_data):
         request = self.context.get('request')
         items_data = validated_data.pop('items_payload', None)
-        if not validated_data.get('operator') and request and request.user.is_authenticated:
-            validated_data['operator'] = request.user.get_full_name() or request.user.get_username()
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if items_data is not None:
-            instance.items.all().delete()
-            for item in items_data:
-                PurchaseOrderItem.objects.create(order=instance, **item)
+        _resolve_operator(validated_data, request)
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            if items_data is not None:
+                existing_items = {item.id: item for item in instance.items.select_for_update()}
+                retained_ids = set()
+                for item in items_data:
+                    item_data = dict(item)
+                    item_id = item_data.pop('id', None)
+                    if item_id is not None:
+                        purchase_item = existing_items.get(item_id)
+                        if not purchase_item:
+                            raise serializers.ValidationError({'items_payload': f'未知的采购明细 ID: {item_id}'})
+                        new_quantity = item_data.get('quantity', purchase_item.quantity)
+                        received_total = purchase_item.receipts.aggregate(total=Sum('quantity_received'))['total'] or Decimal('0')
+                        if received_total > new_quantity:
+                            raise serializers.ValidationError({
+                                'items_payload': f'明细 {item_id} 的数量不能小于已入库数量 {received_total}',
+                            })
+                        for field, value in item_data.items():
+                            setattr(purchase_item, field, value)
+                        purchase_item.save()
+                        retained_ids.add(item_id)
+                    else:
+                        PurchaseOrderItem.objects.create(order=instance, **item_data)
+                existing_ids = set(existing_items.keys())
+                ids_to_delete = existing_ids - retained_ids
+                if ids_to_delete:
+                    instance.items.filter(id__in=ids_to_delete).delete()
         return instance
 
     def _generate_order_no(self):
         from django.utils import timezone
         year = timezone.now().year
         prefix = f'PO{year}'
-        count = PurchaseOrder.objects.filter(order_no__startswith=prefix).count() + 1
-        return f'{prefix}-{count:04d}'
+        latest = (
+            PurchaseOrder.objects.select_for_update()
+            .filter(order_no__startswith=prefix)
+            .order_by('-order_no')
+            .first()
+        )
+        if latest:
+            try:
+                counter = int(latest.order_no.split('-')[-1]) + 1
+            except (ValueError, IndexError):
+                counter = 1
+        else:
+            counter = 1
+        return f'{prefix}-{counter:04d}'
 
 
 class ReceivingLogSerializer(serializers.ModelSerializer):
@@ -128,15 +166,29 @@ class ReceivingLogSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('数量必须大于0')
         return value
 
+    def validate(self, attrs):
+        purchase_item = attrs.get('purchase_item') or getattr(self.instance, 'purchase_item', None)
+        quantity = attrs.get('quantity_received') or getattr(self.instance, 'quantity_received', None)
+        if purchase_item and quantity:
+            recorded = purchase_item.receipts.aggregate(total=Sum('quantity_received'))['total'] or Decimal('0')
+            if self.instance:
+                recorded -= self.instance.quantity_received
+            remaining = purchase_item.quantity - recorded
+            if quantity > remaining:
+                raise serializers.ValidationError({'quantity_received': f'超过待收数量，剩余 {remaining}'})
+        return attrs
+
     def create(self, validated_data):
         _resolve_operator(validated_data, self.context.get('request'))
         return super().create(validated_data)
 
 
 class SalesOrderItemWriteSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
+
     class Meta:
         model = SalesOrderItem
-        fields = ['product', 'custom_product_name', 'detail_description', 'price', 'quantity']
+        fields = ['id', 'product', 'custom_product_name', 'detail_description', 'price', 'quantity']
         extra_kwargs = {
             'detail_description': {'required': False, 'allow_blank': True},
         }
@@ -202,13 +254,35 @@ class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
         items_data = validated_data.pop('items_payload', None)
         request = self.context.get('request')
         _resolve_operator(validated_data, request)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if items_data is not None:
-            instance.items.all().delete()
-            for item in items_data:
-                SalesOrderItem.objects.create(order=instance, **item)
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            if items_data is not None:
+                existing_items = {item.id: item for item in instance.items.select_for_update()}
+                retained_ids = set()
+                for item in items_data:
+                    item_data = dict(item)
+                    item_id = item_data.pop('id', None)
+                    if item_id is not None:
+                        sales_item = existing_items.get(item_id)
+                        if not sales_item:
+                            raise serializers.ValidationError({'items_payload': f'未知的明细 ID: {item_id}'})
+                        new_quantity = item_data.get('quantity', sales_item.quantity)
+                        if sales_item.shipped_quantity > new_quantity:
+                            raise serializers.ValidationError({
+                                'items_payload': f'明细 {item_id} 的数量不能小于已发货数量 {sales_item.shipped_quantity}',
+                            })
+                        for field, value in item_data.items():
+                            setattr(sales_item, field, value)
+                        sales_item.save()
+                        retained_ids.add(item_id)
+                    else:
+                        SalesOrderItem.objects.create(order=instance, **item_data)
+                existing_ids = set(existing_items.keys())
+                ids_to_delete = existing_ids - retained_ids
+                if ids_to_delete:
+                    instance.items.filter(id__in=ids_to_delete).delete()
         return instance
 
     def _generate_order_no(self):
@@ -258,6 +332,18 @@ class ShippingLogSerializer(serializers.ModelSerializer):
         if value <= 0:
             raise serializers.ValidationError('发货数量必须大于0')
         return value
+
+    def validate(self, attrs):
+        sales_item = attrs.get('sales_item') or getattr(self.instance, 'sales_item', None)
+        quantity = attrs.get('quantity_shipped') or getattr(self.instance, 'quantity_shipped', None)
+        if sales_item and quantity is not None:
+            shipped = sales_item.shippings.aggregate(total=Sum('quantity_shipped'))['total'] or Decimal('0')
+            if self.instance:
+                shipped -= self.instance.quantity_shipped
+            remaining = sales_item.quantity - shipped
+            if quantity > remaining:
+                raise serializers.ValidationError({'quantity_shipped': f'超过待发数量，剩余 {remaining}'})
+        return attrs
 
     def create(self, validated_data):
         _resolve_operator(validated_data, self.context.get('request'))

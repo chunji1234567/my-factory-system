@@ -199,6 +199,7 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
       const blob = await api.exportFinancePartnerLedger(selectedPartner.id, financeType, {
         ledgerFrom: appliedLedgerFrom,
         ledgerTo: appliedLedgerTo,
+        summary: true,
       });
       const partnerName = detail?.partner_name || selectedPartner.name || 'partner';
       const safeName = partnerName.replace(/[^\w\u4e00-\u9fa5-]+/g, '_');

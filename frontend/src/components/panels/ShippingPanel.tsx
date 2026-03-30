@@ -10,7 +10,6 @@ const STATUS_OPTIONS = [
   { value: 'PRODUCING', label: '生产中' },
   { value: 'SHIPPED', label: '发货中' },
   { value: 'COMPLETED', label: '已完成' },
-  { value: 'PENDING', label: '待处理' },
 ];
 const EVENT_TYPE_LABELS: Record<string, string> = {
   SHIPPING: '发货记录',
@@ -402,7 +401,7 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
             </button>
           ))}
         </div>
-        <div className="mt-4 overflow-hidden rounded-xl border border-slate-100">
+        <div className="mt-4 hidden overflow-x-auto rounded-xl border border-slate-100 md:block">
           <table className="min-w-full divide-y divide-slate-100 text-sm">
             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
               <tr>
@@ -445,7 +444,7 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
                       <StatusBadge kind="shipping" status={order.status} />
                     </td>
                     <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
-                      <div className="flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+                      <div className="flex items-center gap-2">
                         <select
                           value={draft}
                           onChange={(event) =>
@@ -454,7 +453,6 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
                               [order.id]: event.target.value,
                             }))
                           }
-                          onClick={(event) => event.stopPropagation()}
                           className="rounded-full border border-slate-200 px-3 py-2 text-xs text-slate-600"
                         >
                           {STATUS_OPTIONS.map((option) => (
@@ -465,9 +463,10 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
                         </select>
                         <button
                           className="rounded-full bg-slate-900 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                          onClick={() => handleStatusUpdate(order.id)}
-                          onMouseDown={(event) => event.stopPropagation()}
-                          onClickCapture={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleStatusUpdate(order.id);
+                          }}
                           disabled={statusSaving === order.id || draft === order.status}
                         >
                           {statusSaving === order.id ? '更新中…' : '更新状态'}
@@ -479,6 +478,71 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
               })}
             </tbody>
           </table>
+        </div>
+        <div className="mt-4 space-y-4 md:hidden">
+          {statusPagedOrders.map((order) => {
+            const total = order.items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
+            const shipped = order.items.reduce((sum, item) => sum + Number(item.shipped_quantity ?? 0), 0);
+            const draft = statusDrafts[order.id] ?? order.status;
+            return (
+              <article
+                key={order.id}
+                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                onClick={() => setEventModalOrderId(order.id)}
+              >
+                <div className="flex flex-col gap-1">
+                  <p className="text-base font-semibold text-slate-900">
+                    {order.partner_name ?? `客户#${order.partner}`}
+                  </p>
+                  <p className="font-mono text-xs text-slate-500">订单：{order.order_no}</p>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span className="text-xs text-slate-500">发货 {shipped}/{total}</span>
+                  <StatusBadge kind="shipping" status={order.status} />
+                </div>
+                <div className="mt-3 space-y-2 text-xs text-slate-600">
+                  {(order.items ?? []).map((item) => (
+                    <div key={item.id} className="rounded-xl bg-slate-50 px-3 py-1">
+                      <p className="font-semibold text-slate-900">{item.custom_product_name}</p>
+                      <p className="text-slate-500">数量：{item.quantity}</p>
+                      {item.detail_description && (
+                        <p className="text-slate-400">{item.detail_description}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-4 flex flex-col gap-2" onClick={(event) => event.stopPropagation()}>
+                  <select
+                    value={draft}
+                    onChange={(event) =>
+                      setStatusDrafts((prev) => ({
+                        ...prev,
+                        [order.id]: event.target.value,
+                      }))
+                    }
+                    onClick={(event) => event.stopPropagation()}
+                    className="rounded-full border border-slate-200 px-3 py-2 text-xs text-slate-600"
+                  >
+                    {STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="rounded-full bg-slate-900 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleStatusUpdate(order.id);
+                    }}
+                    disabled={statusSaving === order.id || draft === order.status}
+                  >
+                    {statusSaving === order.id ? '更新中…' : '更新状态'}
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
         <div className="mt-4">
           <Pagination page={statusPage} pageSize={statusPageSize} total={filteredOrders.length} onPageChange={setStatusPage} />
@@ -621,13 +685,13 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
         </form>
       </section>
 
-      <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
+      <section className="hidden rounded-2xl border border-slate-100 bg-white p-6 shadow-sm md:block">
         <div className="flex items-center justify-between">
           <h3 className="text-2xl font-semibold text-slate-900">发货日志</h3>
           {shippingLogsQuery.loading && <span className="text-sm text-slate-500">加载中…</span>}
         </div>
         {shippingLogsQuery.error && <p className="mt-2 text-sm text-rose-600">{shippingLogsQuery.error}</p>}
-        <div className="mt-4 overflow-hidden rounded-xl border border-slate-100">
+        <div className="mt-4 overflow-x-auto rounded-xl border border-slate-100">
           <table className="min-w-full divide-y divide-slate-100 text-sm">
             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
               <tr>
@@ -639,7 +703,7 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
                 <th className="px-4 py-3">发货时间</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 bg白 text-slate-700">
+            <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
               {logPagedData.map((log) => {
                 const { partnerName, orderNo, itemLabel } = getLogContext(log);
                 return (

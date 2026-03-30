@@ -15,6 +15,7 @@ export interface PurchaseOrderItemResponse {
   } | null;
   price: number;
   quantity: number;
+  received_quantity: number;
 }
 
 export interface PurchaseOrderResponse {
@@ -51,6 +52,7 @@ export function usePurchaseOrders(enabled = true) {
               ...item,
               price: Number(item.price ?? 0),
               quantity: Number(item.quantity ?? 0),
+              received_quantity: Number(item.received_quantity ?? 0),
             }))
           : [],
       }));

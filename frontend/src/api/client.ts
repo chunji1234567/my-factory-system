@@ -130,6 +130,7 @@ export const api = {
     partner: number;
     operator?: string;
     items_payload: Array<{
+      id?: number;
       product: number | null;
       custom_product_name: string;
       detail_description?: string;
@@ -149,6 +150,7 @@ export const api = {
       status: string;
       operator?: string;
       items_payload: Array<{
+        id?: number;
         product: number | null;
         custom_product_name: string;
         detail_description?: string;
@@ -198,14 +200,17 @@ export const api = {
     order_no: string;
     partner: number;
     operator?: string;
-    items_payload: Array<{ product: number; price: number; quantity: number }>;
+    items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>;
   }) {
     return apiFetch(`/api/business/purchase-orders/`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   },
-  updatePurchaseOrder(id: number, payload: Partial<{ partner: number; status: string; operator?: string; items_payload: Array<{ product: number; price: number; quantity: number }>;}>) {
+  updatePurchaseOrder(
+    id: number,
+    payload: Partial<{ partner: number; status: string; operator?: string; items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>; }>,
+  ) {
     return apiFetch(`/api/business/purchase-orders/${id}/`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
@@ -272,12 +277,15 @@ export const api = {
   async exportFinancePartnerLedger(
     partnerId: number,
     type: 'receivable' | 'payable',
-    options?: { ledgerPage?: number; ledgerPageSize?: number; ledgerFrom?: string | null; ledgerTo?: string | null },
+    options?: { ledgerPage?: number; ledgerPageSize?: number; ledgerFrom?: string | null; ledgerTo?: string | null; summary?: boolean },
   ) {
     if (!authToken) {
       throw new Error('Missing auth token');
     }
     const params = new URLSearchParams({ type });
+    if (options?.summary) {
+      params.set('summary', '1');
+    }
     if (options?.ledgerPage) {
       params.set('ledger_page', String(options.ledgerPage));
     }

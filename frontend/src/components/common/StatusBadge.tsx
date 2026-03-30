@@ -13,7 +13,6 @@ const SALES_COLORS: Record<string, string> = {
   PRODUCING: 'bg-amber-100 text-amber-700',
   SHIPPED: 'bg-indigo-100 text-indigo-700',
   COMPLETED: 'bg-emerald-100 text-emerald-700',
-  PENDING: 'bg-rose-100 text-rose-700',
 };
 
 const PURCHASE_COLORS: Record<string, string> = {
@@ -27,7 +26,6 @@ const SALES_LABELS: Record<string, string> = {
   PRODUCING: '生产中',
   SHIPPED: '已发货',
   COMPLETED: '已完成',
-  PENDING: '待处理',
 };
 
 const PURCHASE_LABELS: Record<string, string> = {

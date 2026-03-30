@@ -38,7 +38,7 @@ class PartnerListCreateView(generics.ListCreateAPIView):
     serializer_class = PartnerSerializer
 
     def get_permissions(self):
-        if self.request.method == 'POST':
+        if self.request.method in ('GET', 'POST'):
             return [IsManager()]
         return super().get_permissions()
 

@@ -1,7 +1,7 @@
-from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
 import csv
 
+from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Sum, Count, Max, F, ExpressionWrapper, DecimalField
 from django.core.paginator import Paginator
 from django.http import HttpResponse
@@ -163,9 +163,23 @@ class SalesOrderViewSet(mixins.ListModelMixin,
         if order.status == target_status:
             return Response({'id': order.id, 'status': order.status})
 
+        if not self._is_valid_transition(order.status, target_status):
+            return Response({'detail': '非法的状态转换'}, status=400)
+
         order.status = target_status
         order.save(update_fields=['status'])
         return Response({'id': order.id, 'status': order.status})
+
+    @staticmethod
+    def _is_valid_transition(current, target):
+        flow = ['ORDERED', 'PRODUCING', 'SHIPPED', 'COMPLETED']
+        try:
+            current_index = flow.index(current)
+            target_index = flow.index(target)
+        except ValueError:
+            return False
+        # 只允许保持原状态或前进到下一阶段
+        return target_index == current_index + 1
 
 
 class CustomerPreferredProductViewSet(mixins.ListModelMixin,
@@ -374,6 +388,7 @@ def _ledger_group_key(entry):
     return ('ENTRY', entry.id)
 
 
+
 class FinancePartnerLedgerExportView(APIView):
     permission_classes = [IsAuthenticated, IsManager]
     renderer_classes = [renderers.JSONRenderer, renderers.BrowsableAPIRenderer, CSVRenderer]
@@ -386,30 +401,34 @@ class FinancePartnerLedgerExportView(APIView):
             return Response({'detail': 'Invalid finance type'}, status=400)
         partner = get_object_or_404(Partner, pk=partner_id, partner_type__in=partner_types)
 
-        ledger_qs = PartnerLedgerEntry.objects.filter(partner=partner).select_related(
-            'sales_order', 'purchase_order', 'transaction'
-        ).prefetch_related(
-            'sales_order__items__product',
-            'purchase_order__items__product',
-        ).order_by('-created_at')
-
         ledger_from = FinancePartnerDetailView._parse_date_param(request.query_params.get('ledger_from'))
         ledger_to = FinancePartnerDetailView._parse_date_param(request.query_params.get('ledger_to'))
-        if ledger_from:
-            ledger_qs = ledger_qs.filter(created_at__date__gte=ledger_from)
-        if ledger_to:
-            ledger_qs = ledger_qs.filter(created_at__date__lte=ledger_to)
-
-        ledger_page_param = request.query_params.get('ledger_page')
-        if ledger_page_param:
-            ledger_page = parse_positive_int(ledger_page_param, 1)
-            ledger_page_size = parse_positive_int(request.query_params.get('ledger_page_size'), 30, max_value=200)
-            paginator = Paginator(ledger_qs, ledger_page_size)
-            entries = paginator.get_page(ledger_page).object_list
-        else:
-            entries = ledger_qs
-
         export_year = self._parse_year(request.query_params.get('year'))
+        summary_mode = request.query_params.get('summary') in {'1', 'true', 'True'}
+
+        if summary_mode:
+            entries = _build_summary_rows(partner, order_model, finance_type, ledger_from, ledger_to, export_year)
+        else:
+            ledger_qs = PartnerLedgerEntry.objects.filter(partner=partner).select_related(
+                'sales_order', 'purchase_order', 'transaction'
+            ).prefetch_related(
+                'sales_order__items__product',
+                'purchase_order__items__product',
+            ).order_by('-created_at')
+
+            if ledger_from:
+                ledger_qs = ledger_qs.filter(created_at__date__gte=ledger_from)
+            if ledger_to:
+                ledger_qs = ledger_qs.filter(created_at__date__lte=ledger_to)
+
+            ledger_page_param = request.query_params.get('ledger_page')
+            if ledger_page_param:
+                ledger_page = parse_positive_int(ledger_page_param, 1)
+                ledger_page_size = parse_positive_int(request.query_params.get('ledger_page_size'), 30, max_value=200)
+                paginator = Paginator(ledger_qs, ledger_page_size)
+                entries = paginator.get_page(ledger_page).object_list
+            else:
+                entries = ledger_qs
 
         response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
         filename = f'partner_{partner.id}_ledger.csv'
@@ -417,60 +436,73 @@ class FinancePartnerLedgerExportView(APIView):
         response.write('\ufeff')
         writer = csv.writer(response)
 
-        writer.writerow(['台账记录'])
+        writer.writerow([partner.name])
         writer.writerow(['日期', '类型', '借方', '贷方', '净额', '备注', '来源'])
 
         for entry in entries:
-            entry_type_label = LEDGER_ENTRY_TYPE_LABELS.get(entry.entry_type, entry.entry_type)
-            created_at = entry.created_at.strftime('%Y-%m-%d')
-            source = _format_ledger_source(entry)
-            note = _compose_entry_note(entry)
+            if summary_mode:
+                entry_type_label = entry['entry_type_label']
+                created_at = entry['created_at'].strftime('%Y-%m-%d')
+                note = entry['note']
+                source = entry['source']
+                debit = entry['debit_amount']
+                credit = entry['credit_amount']
+                amount = entry['amount']
+            else:
+                entry_type_label = LEDGER_ENTRY_TYPE_LABELS.get(entry.entry_type, entry.entry_type)
+                created_at = entry.created_at.strftime('%Y-%m-%d')
+                source = _format_ledger_source(entry)
+                note = _compose_entry_note(entry)
+                debit = entry.debit_amount
+                credit = entry.credit_amount
+                amount = entry.amount
+
             writer.writerow([
                 created_at,
                 entry_type_label,
-                f"{entry.debit_amount:.2f}",
-                f"{entry.credit_amount:.2f}",
-                f"{entry.amount:.2f}",
+                f"{debit:.2f}",
+                f"{credit:.2f}",
+                f"{amount:.2f}",
                 note,
                 source,
             ])
 
-        writer.writerow([])
+        if not summary_mode:
+            writer.writerow([])
 
-        orders = order_model.objects.filter(partner=partner)
-        if export_year:
-            orders = orders.filter(created_at__year=export_year)
-        orders = orders.prefetch_related('items__product')
+            orders = order_model.objects.filter(partner=partner)
+            if export_year:
+                orders = orders.filter(created_at__year=export_year)
+            orders = orders.prefetch_related('items__product')
 
-        writer.writerow(['订单明细'])
-        writer.writerow(['订单号', '状态', '总额', '创建时间', '产品明细'])
-        for order in orders.order_by('-created_at'):
-            total_amount = order.total_amount or Decimal('0')
-            paid_amount = order.paid_amount or Decimal('0')
-            writer.writerow([
-                order.order_no,
-                order.status,
-                f"{total_amount:.2f}",
-                order.created_at.strftime('%Y-%m-%d'),
-                _format_order_items(order),
-            ])
+            writer.writerow(['订单明细'])
+            writer.writerow(['订单号', '状态', '总额', '创建时间', '产品明细'])
+            for order in orders.order_by('-created_at'):
+                total_amount = order.total_amount or Decimal('0')
+                writer.writerow([
+                    order.order_no,
+                    order.status,
+                    f"{total_amount:.2f}",
+                    order.created_at.strftime('%Y-%m-%d'),
+                    _format_order_items(order),
+                ])
 
-        writer.writerow([])
+            writer.writerow([])
 
-        transactions = FinancialTransaction.objects.filter(partner=partner)
-        if export_year:
-            transactions = transactions.filter(created_at__year=export_year)
+            transactions = FinancialTransaction.objects.filter(partner=partner)
+            if export_year:
+                transactions = transactions.filter(created_at__year=export_year)
 
-        writer.writerow(['财务流水'])
-        writer.writerow(['金额', '类型', '备注', '时间'])
-        for txn in transactions.order_by('-created_at'):
-            amount = txn.amount or Decimal('0')
-            writer.writerow([
-                f"{amount:.2f}",
-                txn.get_transaction_type_display(),
-                txn.note or '',
-                txn.created_at.strftime('%Y-%m-%d'),
-            ])
+            writer.writerow(['财务流水'])
+            writer.writerow(['金额', '类型', '备注', '时间'])
+            for txn in transactions.order_by('-created_at'):
+                amount = txn.amount or Decimal('0')
+                writer.writerow([
+                    f"{amount:.2f}",
+                    txn.get_transaction_type_display(),
+                    txn.note or '',
+                    txn.created_at.strftime('%Y-%m-%d'),
+                ])
 
         return response
 
@@ -603,3 +635,57 @@ class FinancePartnerDetailView(APIView):
         if not value:
             return None
         return parse_date(value)
+def _split_amount(value):
+    debit = value if value > 0 else Decimal('0')
+    credit = -value if value < 0 else Decimal('0')
+    return debit, credit
+
+
+def _build_summary_rows(partner, order_model, finance_type, ledger_from, ledger_to, export_year):
+    rows = []
+    orders = order_model.objects.filter(partner=partner).prefetch_related('items__product')
+    if ledger_from:
+        orders = orders.filter(created_at__date__gte=ledger_from)
+    if ledger_to:
+        orders = orders.filter(created_at__date__lte=ledger_to)
+    if export_year:
+        orders = orders.filter(created_at__year=export_year)
+    order_type_label = '销售订单' if finance_type == 'receivable' else '采购订单'
+    order_source_label = '销售单' if finance_type == 'receivable' else '采购单'
+    for order in orders.order_by('-created_at'):
+        amount = Decimal(order.total_amount or 0)
+        if finance_type == 'payable':
+            amount = -amount
+        debit, credit = _split_amount(amount)
+        rows.append({
+            'created_at': order.created_at,
+            'entry_type_label': order_type_label,
+            'debit_amount': debit,
+            'credit_amount': credit,
+            'amount': amount,
+            'note': _format_order_items(order),
+            'source': f"{order_source_label} {order.order_no}",
+        })
+
+    transactions = FinancialTransaction.objects.filter(partner=partner)
+    if ledger_from:
+        transactions = transactions.filter(created_at__date__gte=ledger_from)
+    if ledger_to:
+        transactions = transactions.filter(created_at__date__lte=ledger_to)
+    if export_year:
+        transactions = transactions.filter(created_at__year=export_year)
+    for txn in transactions.order_by('-created_at'):
+        amount = Decimal(txn.amount or 0)
+        debit, credit = _split_amount(amount)
+        rows.append({
+            'created_at': txn.created_at,
+            'entry_type_label': '财务流水',
+            'debit_amount': debit,
+            'credit_amount': credit,
+            'amount': amount,
+            'note': txn.note or '',
+            'source': f"财务流水 #{txn.id}",
+        })
+
+    rows.sort(key=lambda item: item['created_at'], reverse=True)
+    return rows

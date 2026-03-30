@@ -190,6 +190,6 @@ export const mockShippingLogs: ShippingLogMock[] = [
     quantity: 500,
     shippedQuantity: 320,
     shippedAt: '2026-03-22T11:45:00Z',
-    status: 'PENDING',
+    status: 'ORDERED',
   },
 ];

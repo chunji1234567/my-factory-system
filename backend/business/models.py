@@ -12,7 +12,6 @@ class SalesOrder(models.Model):
         ('PRODUCING', '生产中'),
         ('SHIPPED', '已发货'), # 部分或全部发货
         ('COMPLETED', '已完成'),
-        ('PENDING', '待处理(异常)'),
     )
     order_no = models.CharField("销售单号", max_length=50, unique=True)
     partner = models.ForeignKey(
@@ -119,20 +118,21 @@ class ReceivingLog(models.Model):
     operator = models.CharField("仓管员", max_length=50)
 
     def save(self, *args, **kwargs):
-        # 1. 自动增加库存
-        prod = self.purchase_item.product
-        prod.stock_quantity += self.quantity_received
-        prod.save()
+        with transaction.atomic():
+            super().save(*args, **kwargs)
 
-        # 2. 自动记一笔库存流水
-        StockLog.objects.create(
-            product=prod,
-            change_quantity=self.quantity_received,
-            log_type='PURCHASE',
-            reason=f"采购入库: {self.purchase_item.order.order_no}",
-            operator=self.operator
-        )
-        super().save(*args, **kwargs)
+            # 锁定产品库存，防止并发修改
+            prod = Product.objects.select_for_update().get(pk=self.purchase_item.product_id)
+            prod.stock_quantity += self.quantity_received
+            prod.save(update_fields=['stock_quantity'])
+
+            StockLog.objects.create(
+                product=prod,
+                change_quantity=self.quantity_received,
+                log_type='PURCHASE',
+                reason=f"采购入库: {self.purchase_item.order.order_no}",
+                operator=self.operator
+            )
 
 
 class CustomerPreferredProduct(models.Model):

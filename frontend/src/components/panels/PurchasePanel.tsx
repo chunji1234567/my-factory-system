@@ -18,10 +18,18 @@ interface Props {
 }
 
 interface PurchaseItemDraft {
+  id: number | null;
   category: string;
   product: string;
   price: string;
   quantity: string;
+  receivedQuantity: number;
+}
+
+type PurchaseItemEditableField = 'category' | 'product' | 'price' | 'quantity';
+
+function createEmptyPurchaseItemDraft(): PurchaseItemDraft {
+  return { id: null, category: '', product: '', price: '', quantity: '', receivedQuantity: 0 };
 }
 
 const STATUS_OPTIONS = [
@@ -55,7 +63,8 @@ export default function PurchasePanel({
   const [draftId, setDraftId] = useState<number | null>(null);
   const [supplierField, setSupplierField] = useState('');
   const [statusField, setStatusField] = useState<'ORDERED' | 'PARTIAL' | 'RECEIVED'>('ORDERED');
-  const [itemDrafts, setItemDrafts] = useState<PurchaseItemDraft[]>([{ category: '', product: '', price: '', quantity: '' }]);
+  const [itemDrafts, setItemDrafts] = useState<PurchaseItemDraft[]>([createEmptyPurchaseItemDraft()]);
+  const [originalItemDrafts, setOriginalItemDrafts] = useState<PurchaseItemDraft[] | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSaving, setFormSaving] = useState(false);
   const [eventModalOrderId, setEventModalOrderId] = useState<number | null>(null);
@@ -129,12 +138,22 @@ export default function PurchasePanel({
     return grouped;
   }, [products]);
 
+  const removedItemsWithReceipts = useMemo(() => {
+    if (!originalItemDrafts) {
+      return [] as PurchaseItemDraft[];
+    }
+    const currentIds = new Set(itemDrafts.map((item) => item.id).filter((id): id is number => id != null));
+    return originalItemDrafts.filter((item) => item.id != null && item.receivedQuantity > 0 && !currentIds.has(item.id));
+  }, [itemDrafts, originalItemDrafts]);
+  const showReceivingWarning = modalMode === 'edit' && removedItemsWithReceipts.length > 0;
+
   const openCreateModal = () => {
     setModalMode('create');
     setDraftId(null);
     setSupplierField('');
     setStatusField('ORDERED');
-    setItemDrafts([{ product: '', price: '', quantity: '' }]);
+    setItemDrafts([createEmptyPurchaseItemDraft()]);
+    setOriginalItemDrafts(null);
     setFormError(null);
   };
 
@@ -143,16 +162,19 @@ export default function PurchasePanel({
     setDraftId(order.id);
     setSupplierField(formatSupplier(order.partner_name, order.partner));
     setStatusField((order.status as any) ?? 'ORDERED');
-    setItemDrafts(
+    const mappedItems =
       order.items.length
         ? order.items.map((item) => ({
+            id: item.id,
+            receivedQuantity: Number(item.received_quantity ?? 0),
             category: item.product_detail?.category_detail?.id ? String(item.product_detail.category_detail.id) : '',
             product: item.product ? String(item.product) : '',
             price: String(item.price ?? ''),
             quantity: String(item.quantity ?? ''),
           }))
-        : [{ category: '', product: '', price: '', quantity: '' }]
-    );
+        : [createEmptyPurchaseItemDraft()];
+    setItemDrafts(mappedItems);
+    setOriginalItemDrafts(mappedItems.map((item) => ({ ...item })));
     setFormError(null);
   };
 
@@ -186,15 +208,27 @@ export default function PurchasePanel({
       return;
     }
     const normalizedItems = itemDrafts
-      .map((item) => ({
-        product: Number(item.product),
-        price: Number(item.price),
-        quantity: Number(item.quantity),
-      }))
+      .map((item) => {
+        const payload: { id?: number; product: number; price: number; quantity: number } = {
+          product: Number(item.product),
+          price: Number(item.price),
+          quantity: Number(item.quantity),
+        };
+        if (item.id != null) {
+          payload.id = item.id;
+        }
+        return payload;
+      })
       .filter((item) => item.product && item.price && item.quantity);
     if (!normalizedItems.length) {
       setFormError('请至少添加一条采购明细');
       return;
+    }
+    if (modalMode === 'edit' && removedItemsWithReceipts.length) {
+      const confirmed = window.confirm('删除包含入库记录的明细会同时删除相关入库记录，确认继续？');
+      if (!confirmed) {
+        return;
+      }
     }
     try {
       setFormSaving(true);
@@ -221,7 +255,7 @@ export default function PurchasePanel({
     }
   };
 
-  const handleItemChange = (index: number, field: keyof PurchaseItemDraft, value: string) => {
+  const handleItemChange = (index: number, field: PurchaseItemEditableField, value: string) => {
     setItemDrafts((prev) => {
       const next = [...prev];
       const updated = { ...next[index], [field]: value };
@@ -234,7 +268,7 @@ export default function PurchasePanel({
   };
 
   const addItemRow = () => {
-    setItemDrafts((prev) => [...prev, { category: '', product: '', price: '', quantity: '' }]);
+    setItemDrafts((prev) => [...prev, createEmptyPurchaseItemDraft()]);
   };
 
   const removeItemRow = (index: number) => {
@@ -453,6 +487,11 @@ export default function PurchasePanel({
                     添加明细
                   </button>
                 </div>
+                {showReceivingWarning && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    提醒：已入库的明细被删除后，其关联入库记录也会被删除，请谨慎操作。
+                  </div>
+                )}
                 {itemDrafts.map((item, index) => (
                   <div key={index} className="grid gap-3 rounded-xl border border-slate-200 p-4 md:grid-cols-4">
                     <label className="text-sm text-slate-600">
