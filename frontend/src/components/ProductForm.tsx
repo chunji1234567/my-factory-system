@@ -5,15 +5,17 @@ import type { CategoryResponse } from '../hooks/useCategories';
 interface Props {
   categories: CategoryResponse[];
   onSuccess?: () => void;
+  defaultCategoryId?: number | null;
 }
 
-export default function ProductForm({ categories, onSuccess }: Props) {
-  const [category, setCategory] = useState(categories[0]?.id ?? 0);
+export default function ProductForm({ categories, onSuccess, defaultCategoryId }: Props) {
+  const [category, setCategory] = useState(defaultCategoryId ?? categories[0]?.id ?? 0);
   const [internalCode, setInternalCode] = useState('');
   const [modelName, setModelName] = useState('');
   const [unit, setUnit] = useState('个');
   const [stock, setStock] = useState('0');
   const [minStock, setMinStock] = useState('0');
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -26,16 +28,29 @@ export default function ProductForm({ categories, onSuccess }: Props) {
     setLoading(true);
     setMessage(null);
     try {
-      await api.createProduct({
-        category,
-        internal_code: internalCode,
-        model_name: modelName,
-        unit,
-        stock_quantity: Number(stock),
-        min_stock: Number(minStock),
-      });
+      if (imageFile) {
+        const formData = new FormData();
+        formData.append('category', String(category));
+        formData.append('internal_code', internalCode);
+        formData.append('model_name', modelName);
+        formData.append('unit', unit);
+        formData.append('stock_quantity', stock);
+        formData.append('min_stock', minStock);
+        formData.append('image', imageFile);
+        await api.createProduct(formData);
+      } else {
+        await api.createProduct({
+          category,
+          internal_code: internalCode,
+          model_name: modelName,
+          unit,
+          stock_quantity: Number(stock),
+          min_stock: Number(minStock),
+        });
+      }
       setInternalCode('');
       setModelName('');
+      setImageFile(null);
       setMessage('产品创建成功');
       onSuccess?.();
     } catch (err) {
@@ -103,6 +118,18 @@ export default function ProductForm({ categories, onSuccess }: Props) {
           type="number"
           value={minStock}
           onChange={(evt) => setMinStock(evt.target.value)}
+          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2"
+        />
+      </label>
+      <label className="block">
+        <span className="text-slate-500">展示图（可选）</span>
+        <input
+          type="file"
+          accept="image/*"
+          onChange={(event) => {
+            const file = event.target.files?.[0] ?? null;
+            setImageFile(file);
+          }}
           className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2"
         />
       </label>

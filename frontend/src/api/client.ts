@@ -31,7 +31,10 @@ interface ApiOptions extends RequestInit {
 
 export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const headers = new Headers(options.headers ?? {});
-  headers.set('Content-Type', 'application/json');
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  if (!isFormData) {
+    headers.set('Content-Type', 'application/json');
+  }
 
   if (!options.skipAuth) {
     if (!authToken) {
@@ -104,17 +107,22 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  createProduct(payload: {
-    category: number;
-    internal_code: string;
-    model_name: string;
-    unit?: string;
-    stock_quantity?: number;
-    min_stock?: number;
-  }) {
+  createProduct(
+    payload:
+      | {
+          category: number;
+          internal_code: string;
+          model_name: string;
+          unit?: string;
+          stock_quantity?: number;
+          min_stock?: number;
+        }
+      | FormData,
+  ) {
+    const body = payload instanceof FormData ? payload : JSON.stringify(payload);
     return apiFetch(`/api/core/products/`, {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body,
     });
   },
   createPartner(payload: { name: string; partner_type: string }) {

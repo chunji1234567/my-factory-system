@@ -134,6 +134,15 @@ class ReceivingLog(models.Model):
                 operator=self.operator
             )
 
+            product_name = prod.model_name if prod else f"物料#{self.purchase_item.product_id}"
+            note_suffix = f"，备注：{self.remark}" if self.remark else ''
+            PurchaseOrderEvent.objects.create(
+                order=self.purchase_item.order,
+                event_type='RECEIVING',
+                content=f"已收货 [{product_name}] {self.quantity_received}{note_suffix}",
+                operator=self.operator,
+            )
+
 
 class CustomerPreferredProduct(models.Model):
     partner = models.ForeignKey(

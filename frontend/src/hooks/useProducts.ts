@@ -3,8 +3,11 @@ import { api } from '../api/client';
 
 export interface ProductResponse {
   id: number;
+  category: number;
   internal_code: string;
   model_name: string;
+  unit: string;
+  image?: string | null;
   stock_quantity: number;
   min_stock: number;
   category_detail?: {

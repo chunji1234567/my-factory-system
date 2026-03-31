@@ -6,6 +6,7 @@ import ShippingPanel from './components/panels/ShippingPanel';
 import WarehouseReceivingPanel from './components/panels/WarehouseReceivingPanel';
 import FinanceDetailPanel from './components/panels/FinanceDetailPanel';
 import PartnerManagementPanel from './components/panels/PartnerManagementPanel';
+import SelfMadeGalleryPanel from './components/panels/SelfMadeGalleryPanel';
 import LoginForm from './components/LoginForm';
 import { useAuth } from './context/AuthContext';
 import { mockOrders, mockProducts } from './mockData';
@@ -189,6 +190,16 @@ function App() {
             loading={partnersQuery.loading}
             error={partnersQuery.error}
             onRefresh={partnersQuery.reload}
+          />
+        )}
+        {activePanel === 'selfMadeGallery' && (
+          <SelfMadeGalleryPanel
+            products={productsQuery.data}
+            categories={categoriesQuery.data}
+            loading={productsQuery.loading}
+            error={productsQuery.error}
+            onRefresh={productsQuery.reload}
+            onRefreshCategories={categoriesQuery.reload}
           />
         )}
         {activePanel === 'financeDetail' && <FinanceDetailPanel />}

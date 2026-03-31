@@ -20,16 +20,24 @@ interface ReceivingDraft {
 }
 
 const SUPPLIER_TYPES = new Set(['SUPPLIER', 'BOTH']);
+type PurchaseStatus = 'ORDERED' | 'PARTIAL' | 'RECEIVED';
+const STATUS_OPTIONS: { value: PurchaseStatus; label: string }[] = [
+  { value: 'ORDERED', label: '已下单' },
+  { value: 'PARTIAL', label: '部分入库' },
+  { value: 'RECEIVED', label: '全部入库' },
+];
 
 export default function WarehouseReceivingPanel({ orders, partners, loading, error, onRefresh }: Props) {
   const [supplierFilter, setSupplierFilter] = useState('');
   const [selectedSupplierId, setSelectedSupplierId] = useState<number | null>(null);
+  const [statusFilter, setStatusFilter] = useState<PurchaseStatus | ''>('');
   const [modalOrderId, setModalOrderId] = useState<number | null>(null);
   const [draft, setDraft] = useState<ReceivingDraft>({ purchaseItemId: null, quantity: '', remark: '' });
   const [modalError, setModalError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 30;
+  const [expandedOrderId, setExpandedOrderId] = useState<number | null>(null);
 
   const supplierOptions = partners.filter((partner) => SUPPLIER_TYPES.has(partner.partner_type));
 
@@ -40,25 +48,40 @@ export default function WarehouseReceivingPanel({ orders, partners, loading, err
       if (selectedSupplierId && order.partner !== selectedSupplierId) {
         return false;
       }
+      if (statusFilter && order.status !== statusFilter) {
+        return false;
+      }
       return true;
     });
-  }, [orders, selectedSupplierId]);
+  }, [orders, selectedSupplierId, statusFilter]);
+
+  const prioritizedOrders = useMemo(() => {
+    const PRIORITY: Record<string, number> = { ORDERED: 0, PARTIAL: 1, RECEIVED: 2 };
+    return [...filteredOrders].sort((a, b) => {
+      const left = PRIORITY[a.status] ?? 99;
+      const right = PRIORITY[b.status] ?? 99;
+      if (left !== right) {
+        return left - right;
+      }
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+  }, [filteredOrders]);
 
   useEffect(() => {
     setPage(1);
-  }, [selectedSupplierId, orders]);
+  }, [selectedSupplierId, orders, statusFilter]);
 
   useEffect(() => {
-    const totalPages = Math.max(1, Math.ceil(filteredOrders.length / pageSize));
+    const totalPages = Math.max(1, Math.ceil(prioritizedOrders.length / pageSize));
     if (page > totalPages) {
       setPage(totalPages);
     }
-  }, [filteredOrders.length, page, pageSize]);
+  }, [prioritizedOrders.length, page, pageSize]);
 
   const pagedOrders = useMemo(() => {
     const start = (page - 1) * pageSize;
-    return filteredOrders.slice(start, start + pageSize);
-  }, [filteredOrders, page, pageSize]);
+    return prioritizedOrders.slice(start, start + pageSize);
+  }, [prioritizedOrders, page, pageSize]);
 
   const currentOrder = modalOrderId ? orders.find((order) => order.id === modalOrderId) : null;
 
@@ -136,11 +159,11 @@ export default function WarehouseReceivingPanel({ orders, partners, loading, err
             </datalist>
           </div>
           <button
-            type="button"
             className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
             onClick={() => {
               setSupplierFilter('');
               setSelectedSupplierId(null);
+              setStatusFilter('');
             }}
           >
             重置过滤
@@ -153,6 +176,22 @@ export default function WarehouseReceivingPanel({ orders, partners, loading, err
           <h3 className="text-xl font-semibold text-slate-900">待收货的采购单</h3>
           {loading && <span className="text-sm text-slate-500">加载中…</span>}
         </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {STATUS_OPTIONS.slice(0, 2).map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
+                statusFilter === option.value
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 text-slate-600 hover:bg-slate-100'
+              }`}
+              onClick={() => setStatusFilter((prev) => (prev === option.value ? '' : option.value))}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         <div className="mt-4 space-y-4">
           {pagedOrders.map((order) => (
             <div key={order.id} className="rounded-xl border border-slate-200 p-4">
@@ -164,47 +203,100 @@ export default function WarehouseReceivingPanel({ orders, partners, loading, err
                 <StatusBadge kind="purchase" status={order.status} />
               </div>
               <div className="mt-3 overflow-hidden rounded-xl border border-slate-100">
-                <table className="min-w-full divide-y divide-slate-100 text-sm">
-                  <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
-                    <tr>
-                      <th className="px-4 py-2">物料</th>
-                      <th className="px-4 py-2 text-right">需求数量</th>
-                      <th className="px-4 py-2 text-right">已收</th>
-                      <th className="px-4 py-2">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
-                    {order.items.map((item) => {
-                      const received = Number((item as any).received_quantity ?? 0);
-                      const remaining = Number(item.quantity) - received;
-                      return (
-                        <tr key={item.id}>
-                          <td className="px-4 py-2">{item.product_detail?.model_name || `物料#${item.product}`}</td>
-                          <td className="px-4 py-2 text-right">{item.quantity}</td>
-                          <td className="px-4 py-2 text-right">{received}</td>
-                          <td className="px-4 py-2">
-                            <button
-                              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 disabled:opacity-40"
-                              disabled={remaining <= 0}
-                              onClick={() => openModal(order.id, item.id)}
-                            >
-                              确认收货
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <div className="hidden lg:block">
+                  <table className="min-w-full divide-y divide-slate-100 text-sm">
+                    <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
+                      <tr>
+                        <th className="px-4 py-2">物料</th>
+                        <th className="px-4 py-2 text-right">需求数量</th>
+                        <th className="px-4 py-2 text-right">已收</th>
+                        <th className="px-4 py-2">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
+                      {order.items.map((item) => {
+                        const received = Number((item as any).received_quantity ?? 0);
+                        const remaining = Number(item.quantity) - received;
+                        return (
+                          <tr key={item.id}>
+                            <td className="px-4 py-2">{item.product_detail?.model_name || `物料#${item.product}`}</td>
+                            <td className="px-4 py-2 text-right">{item.quantity}</td>
+                            <td className="px-4 py-2 text-right">{received}</td>
+                            <td className="px-4 py-2">
+                              <button
+                                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 disabled:opacity-40"
+                                disabled={remaining <= 0}
+                                onClick={() => openModal(order.id, item.id)}
+                              >
+                                确认收货
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="space-y-2 lg:hidden">
+                  {(expandedOrderId === order.id ? order.items : order.items.slice(0, 2)).map((item) => {
+                    const received = Number((item as any).received_quantity ?? 0);
+                    const remaining = Number(item.quantity) - received;
+                    const progress = Number(item.quantity)
+                      ? Math.min(received / Number(item.quantity), 1)
+                      : 0;
+                    return (
+                      <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold text-slate-900">
+                            {item.product_detail?.model_name || `物料#${item.product}`}
+                          </p>
+                          <span className="text-slate-500">
+                            {received}/{Number(item.quantity)}
+                          </span>
+                        </div>
+                        <div className="mt-2 h-1 rounded-full bg-slate-100">
+                          <div className="h-full rounded-full bg-slate-900" style={{ width: `${progress * 100}%` }} />
+                        </div>
+                        <div className="mt-3">
+                          <button
+                            className="w-full rounded-full border border-slate-200 px-3 py-1 text-center text-xs text-slate-600"
+                            onClick={() => openModal(order.id, item.id)}
+                            disabled={remaining <= 0}
+                          >
+                            {remaining > 0 ? '确认收货' : '已完成'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {order.items.length > 2 && expandedOrderId !== order.id && (
+                    <button
+                      type="button"
+                      className="w-full rounded-full border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-500"
+                      onClick={() => setExpandedOrderId(order.id)}
+                    >
+                      查看全部 {order.items.length} 条明细
+                    </button>
+                  )}
+                  {expandedOrderId === order.id && order.items.length > 2 && (
+                    <button
+                      type="button"
+                      className="w-full rounded-full border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-500"
+                      onClick={() => setExpandedOrderId(null)}
+                    >
+                      收起明细
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
-          {!filteredOrders.length && (
+          {!prioritizedOrders.length && (
             <p className="text-center text-sm text-slate-500">暂无采购单。</p>
           )}
         </div>
         <div className="mt-4">
-          <Pagination page={page} pageSize={pageSize} total={filteredOrders.length} onPageChange={setPage} />
+          <Pagination page={page} pageSize={pageSize} total={prioritizedOrders.length} onPageChange={setPage} />
         </div>
       </section>
 

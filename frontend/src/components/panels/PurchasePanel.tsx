@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, Fragment, useEffect, useMemo, useState } from 'react';
 import type { PurchaseOrderResponse } from '../../hooks/usePurchaseOrders';
 import type { ProductResponse } from '../../hooks/useProducts';
 import type { PartnerResponse } from '../../hooks/usePartners';
@@ -74,6 +74,7 @@ export default function PurchasePanel({
   const [eventError, setEventError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const pageSize = 30;
+  const [expandedOrderId, setExpandedOrderId] = useState<number | null>(null);
 
   const supplierOptions = partners.filter((partner) => SUPPLIER_TYPES.has(partner.partner_type));
 
@@ -110,6 +111,8 @@ export default function PurchasePanel({
     const start = (page - 1) * pageSize;
     return filteredOrders.slice(start, start + pageSize);
   }, [filteredOrders, page, pageSize]);
+
+  const columnCount = isManager || canCreateEvents ? 6 : 5;
   const eventOrder = eventModalOrderId ? orders.find((order) => order.id === eventModalOrderId) : null;
 
   const categoryOptions = useMemo(() => {
@@ -359,54 +362,111 @@ export default function PurchasePanel({
             </thead>
             <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
               {pagedOrders.map((order) => (
-                <tr key={order.id}>
-                  <td className="px-4 py-3">{order.partner_name || `供应商#${order.partner}`}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-500">{order.order_no}</td>
-                  <td className="px-4 py-3">
-                    <StatusBadge
-                      kind="purchase"
-                      status={order.status}
-                      label={STATUS_OPTIONS.find((option) => option.value === order.status)?.label || order.status}
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-right font-semibold">¥ {Number(order.total_amount).toFixed(2)}</td>
-                  <td className="px-4 py-3 text-xs text-slate-500">{new Date(order.created_at).toLocaleString()}</td>
-                  {(isManager || canCreateEvents) && (
-                    <td className="px-4 py-3">
-                      <div className="flex gap-2 text-xs font-semibold">
-                        {canCreateEvents && (
+                <Fragment key={order.id}>
+                  <tr
+                    className="cursor-pointer"
+                    onClick={() => setExpandedOrderId((prev) => (prev === order.id ? null : order.id))}
+                  >
+                    <td className="px-4 py-3">{order.partner_name || `供应商#${order.partner}`}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-500">{order.order_no}</td>
+                      <td className="px-4 py-3">
+                        <StatusBadge
+                          kind="purchase"
+                          status={order.status}
+                          label={STATUS_OPTIONS.find((option) => option.value === order.status)?.label || order.status}
+                        />
+                      </td>
+                      <td className="px-4 py-3 text-right font-semibold">¥ {Number(order.total_amount).toFixed(2)}</td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{formatDate(order.created_at)}</td>
+                    {(isManager || canCreateEvents) && (
+                      <td className="px-4 py-3">
+                        <div className="flex gap-2 text-xs font-semibold">
+                          {canCreateEvents && (
+                            <button
+                              className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 hover:bg-slate-50"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setEventModalOrderId(order.id);
+                                setEventType(PURCHASE_EVENT_TYPES[0].value);
+                                setEventContent('');
+                                setEventError(null);
+                              }}
+                            >
+                              记录事件
+                            </button>
+                          )}
                           <button
                             className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 hover:bg-slate-50"
-                            onClick={() => {
-                              setEventModalOrderId(order.id);
-                              setEventType(PURCHASE_EVENT_TYPES[0].value);
-                              setEventContent('');
-                              setEventError(null);
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openEditModal(order);
                             }}
                           >
-                            记录事件
+                            编辑
                           </button>
-                        )}
-                        <button
-                          className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 hover:bg-slate-50"
-                          onClick={() => openEditModal(order)}
-                        >
-                          编辑
-                        </button>
-                        <button
-                          className="rounded-full border border-rose-200 px-3 py-1 text-rose-600 hover:bg-rose-50"
-                          onClick={() => handleDelete(order.id)}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  )}
-                </tr>
-              ))}
+                          <button
+                            className="rounded-full border border-rose-200 px-3 py-1 text-rose-600 hover:bg-rose-50"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleDelete(order.id);
+                            }}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    )}
+                  </tr>
+                    {expandedOrderId === order.id && (
+                      <tr className="bg-slate-50">
+                        <td colSpan={columnCount} className="space-y-4 p-4">
+                          <div>
+                            <h4 className="text-sm font-semibold text-slate-700">采购明细</h4>
+                            <div className="mt-2 space-y-2">
+                              {order.items.map((item) => (
+                                <div key={item.id} className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+                                  <div className="flex items-center justify-between">
+                                    <p className="font-semibold text-slate-900">
+                                      {item.product_detail?.model_name || `物料#${item.product}`}
+                                    </p>
+                                    <span className="text-slate-500">
+                                      {Number(item.received_quantity)} / {Number(item.quantity)}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-slate-500">单价：¥ {Number(item.price).toFixed(2)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <h4 className="text-sm font-semibold text-slate-700">订单事件</h4>
+                            <div className="mt-2 space-y-2">
+                              {order.events?.length ? (
+                                order.events.map((event) => (
+                                  <div key={event.id} className="rounded-xl border border-slate-200 p-3 text-xs text-slate-600">
+                                    <div className="flex flex-wrap items-center justify-between text-slate-500">
+                                      <span>
+                                        {PURCHASE_EVENT_TYPES.find((type) => type.value === event.event_type)?.label || event.event_type}
+                                      </span>
+                                      <span>{formatDate(event.created_at)}</span>
+                                    </div>
+                                    <p className="mt-1 whitespace-pre-line">{event.content}</p>
+                                    {event.operator && <p className="mt-1 text-slate-500">记录人：{event.operator}</p>}
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-xs text-slate-500">暂无事件记录。</p>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
               {!filteredOrders.length && (
                 <tr>
-                  <td colSpan={isManager || canCreateEvents ? 6 : 5} className="px-4 py-4 text-center text-sm text-slate-500">
+                  <td colSpan={columnCount} className="px-4 py-4 text-center text-sm text-slate-500">
                     暂无采购订单。
                   </td>
                 </tr>
@@ -711,6 +771,14 @@ function formatSupplier(name?: string, id?: number) {
     return `${name}${id ? ` (#${id})` : ''}`;
   }
   return id ? `#${id}` : '';
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString();
 }
 
 function generateOrderNo() {

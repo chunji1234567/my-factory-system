@@ -110,7 +110,11 @@ class PurchaseOrderViewSet(mixins.ListModelMixin,
     ordering_fields = ['created_at', 'total_amount']
 
     def get_queryset(self):
-        return PurchaseOrder.objects.all().prefetch_related('items__product', 'items__receipts').select_related('partner')
+        return (
+            PurchaseOrder.objects.all()
+            .prefetch_related('items__product', 'items__receipts', 'events')
+            .select_related('partner')
+        )
 
     @action(detail=True, methods=['get', 'post'], permission_classes=[IsAuthenticated, IsManagerOrWarehouse], url_path='events')
     def events(self, request, pk=None):

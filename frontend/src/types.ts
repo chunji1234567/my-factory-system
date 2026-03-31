@@ -31,6 +31,11 @@ export const panelConfig = {
     description: '创建合作伙伴并查看余额',
     roles: ['manager'] satisfies PanelRole[],
   },
+  selfMadeGallery: {
+    title: '自产图库',
+    description: '展示自产外壳并快速调整库存',
+    roles: ['manager', 'warehouse'] satisfies PanelRole[],
+  },
   financeDetail: {
     title: '财务流水',
     description: '查看合作伙伴的转账记录',

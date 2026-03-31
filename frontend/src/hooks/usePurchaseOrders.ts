@@ -18,6 +18,14 @@ export interface PurchaseOrderItemResponse {
   received_quantity: number;
 }
 
+export interface PurchaseOrderEventResponse {
+  id: number;
+  event_type: string;
+  content: string;
+  operator?: string | null;
+  created_at: string;
+}
+
 export interface PurchaseOrderResponse {
   id: number;
   partner: number;
@@ -28,6 +36,7 @@ export interface PurchaseOrderResponse {
   created_at: string;
   operator?: string;
   items: PurchaseOrderItemResponse[];
+  events?: PurchaseOrderEventResponse[];
 }
 
 export function usePurchaseOrders(enabled = true) {
@@ -53,6 +62,15 @@ export function usePurchaseOrders(enabled = true) {
               price: Number(item.price ?? 0),
               quantity: Number(item.quantity ?? 0),
               received_quantity: Number(item.received_quantity ?? 0),
+            }))
+          : [],
+        events: Array.isArray(order.events)
+          ? order.events.map((event: any) => ({
+              id: event.id,
+              event_type: event.event_type,
+              content: event.content,
+              operator: event.operator ?? null,
+              created_at: event.created_at,
             }))
           : [],
       }));

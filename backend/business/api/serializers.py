@@ -61,19 +61,32 @@ class PurchaseOrderItemSerializer(MonetaryMaskMixin, serializers.ModelSerializer
         return obj.receipts.aggregate(total=Sum('quantity_received'))['total'] or Decimal('0')
 
 
+class PurchaseOrderEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PurchaseOrderEvent
+        fields = ['id', 'event_type', 'content', 'operator', 'created_at']
+        read_only_fields = ['operator', 'created_at']
+
+    def create(self, validated_data):
+        _resolve_operator(validated_data, self.context.get('request'))
+        order = self.context['order']
+        return order.events.create(**validated_data)
+
+
 class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
     partners = None
     items = PurchaseOrderItemSerializer(many=True, read_only=True)
     items_payload = PurchaseOrderItemWriteSerializer(many=True, write_only=True, required=False)
     partner_name = serializers.CharField(source='partner.name', read_only=True)
     received_quantity = serializers.SerializerMethodField()
+    events = PurchaseOrderEventSerializer(many=True, read_only=True)
     monetary_fields = ['total_amount']
 
     class Meta:
         model = PurchaseOrder
         fields = [
             'id', 'order_no', 'partner', 'partner_name', 'status', 'total_amount',
-            'created_at', 'operator', 'items', 'items_payload', 'received_quantity'
+            'created_at', 'operator', 'items', 'items_payload', 'received_quantity', 'events'
         ]
         extra_kwargs = {
             'order_no': {'required': False, 'allow_blank': True},
@@ -299,18 +312,6 @@ class CustomerPreferredProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomerPreferredProduct
         fields = ['id', 'partner', 'partner_name', 'name', 'created_at']
-
-
-class PurchaseOrderEventSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PurchaseOrderEvent
-        fields = ['id', 'event_type', 'content', 'operator', 'created_at']
-        read_only_fields = ['operator', 'created_at']
-
-    def create(self, validated_data):
-        _resolve_operator(validated_data, self.context.get('request'))
-        order = self.context['order']
-        return order.events.create(**validated_data)
 
 
 class ShippingLogSerializer(serializers.ModelSerializer):
