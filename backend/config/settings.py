@@ -14,8 +14,22 @@ from pathlib import Path
 from datetime import timedelta
 import os
 
+import dj_database_url
+from dotenv import load_dotenv
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / '.env')
+
+TRUE_VALUES = {'1', 'true', 'yes', 'on'}
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in TRUE_VALUES
 
 
 # Quick-start development settings - unsuitable for production
@@ -27,7 +41,7 @@ if not SECRET_KEY:
     raise RuntimeError('DJANGO_SECRET_KEY environment variable is required')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DJANGO_DEBUG', 'False').lower() in {'1', 'true', 'yes'}
+DEBUG = env_bool('DJANGO_DEBUG', False)
 
 if DEBUG:
     default_hosts = ['localhost', '127.0.0.1', '0.0.0.0']
@@ -89,11 +103,22 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+database_url = os.environ.get('DATABASE_URL')
+if not database_url:
+    default_sqlite_path = BASE_DIR / 'db.sqlite3'
+    database_url = f'sqlite:///{default_sqlite_path.as_posix()}'
+
+try:
+    conn_max_age = int(os.environ.get('DB_CONN_MAX_AGE', '0'))
+except ValueError as exc:
+    raise ValueError('DB_CONN_MAX_AGE must be an integer') from exc
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.parse(
+        database_url,
+        conn_max_age=conn_max_age,
+        ssl_require=env_bool('DB_SSL_REQUIRE', False),
+    )
 }
 
 
@@ -131,15 +156,24 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = os.environ.get('DJANGO_STATIC_URL', 'static/')
+STATIC_ROOT = os.environ.get('DJANGO_STATIC_ROOT', BASE_DIR / 'staticfiles')
 
+MEDIA_URL = os.environ.get('DJANGO_MEDIA_URL', '/media/')
+MEDIA_ROOT = os.environ.get('DJANGO_MEDIA_ROOT', os.path.join(BASE_DIR, 'media'))
 
-# 用户上传的文件（图片等）存放在项目根目录下的 media 文件夹
-MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+cors_allow_all = env_bool('DJANGO_CORS_ALLOW_ALL', DEBUG)
+if cors_allow_all:
+    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = []
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    raw_cors = os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', '')
+    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in raw_cors.split(',') if origin.strip()]
 
-# 允许跨域访问（开发阶段先全放开）
-CORS_ALLOW_ALL_ORIGINS = True
+raw_csrf = os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '')
+if raw_csrf:
+    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in raw_csrf.split(',') if origin.strip()]
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
