@@ -254,7 +254,7 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
 
       <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <h3 className="text-2xl font-semibold text-slate-900">创建合作方</h3>
-        <p className="text-sm text-slate-500">仅经理可创建，支持客户/供应商/双重角色</p>
+        <p className="text-sm text-slate-500">支持客户/供应商/双重角色</p>
         <form className="mt-4 grid gap-4 sm:grid-cols-3" onSubmit={handleCreatePartner}>
           <label className="text-sm text-slate-600">
             <span className="block">名称</span>
@@ -315,7 +315,7 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
             </div>
           </div>
           <div className="mt-4 overflow-hidden rounded-xl border border-slate-100">
-            <table className="min-w-full divide-y divide-slate-100 text-sm">
+            <table className="hidden min-w-full divide-y divide-slate-100 text-sm lg:table">
               <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
                 <tr>
                   <th className="px-4 py-3">名称</th>
@@ -344,6 +344,25 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="mt-4 space-y-3 lg:hidden">
+            {sortedPartners.map((partner) => (
+              <button
+                key={partner.id}
+                type="button"
+                className="w-full rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm"
+                onClick={() => openDetail(partner, 'orders')}
+              >
+                <p className="text-base font-semibold text-slate-900">{partner.name}</p>
+                <p className="text-xs text-slate-500">{PARTNER_TYPE_LABEL[partner.partner_type] ?? partner.partner_type}</p>
+                <p className="mt-2 text-sm text-slate-600">余额：{partner.balance.toFixed(2)}</p>
+              </button>
+            ))}
+            {!sortedPartners.length && (
+              <p className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
+                暂无合作方记录。
+              </p>
+            )}
           </div>
         </section>
       )}
@@ -395,7 +414,7 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
           {detailLoading && <p className="mt-4 text-sm text-slate-500">正在加载详情…</p>}
           {!detailLoading && detail && detailView === 'orders' && (
             <div className="mt-4 overflow-hidden rounded-xl border border-slate-100">
-              <table className="min-w-full divide-y divide-slate-100 text-sm">
+              <table className="hidden min-w-full divide-y divide-slate-100 text-sm lg:table">
                 <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
                   <tr>
                     <th className="px-4 py-3">订单号</th>
@@ -422,6 +441,17 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
                   )}
                 </tbody>
               </table>
+              <div className="mt-3 space-y-2 lg:hidden">
+                {detail.orders.map((order) => (
+                  <div key={order.id} className="rounded-2xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+                    <p className="font-semibold text-slate-800">{order.order_no}</p>
+                    <p className="text-slate-500">状态：{order.status}</p>
+                    <p className="text-slate-500">金额：{Number(order.total_amount).toFixed(2)}</p>
+                    <p className="text-slate-500">已付：{Number(order.paid_amount).toFixed(2)}</p>
+                  </div>
+                ))}
+                {!detail.orders.length && <p className="text-center text-sm text-slate-500">暂无订单记录。</p>}
+              </div>
             </div>
           )}
           {!detailLoading && detail && detailView === 'transactions' && (
@@ -498,7 +528,7 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
                 </div>
               </div>
               <div className="overflow-hidden rounded-xl border border-slate-100">
-                <table className="min-w-full divide-y divide-slate-100 text-sm">
+                <table className="hidden min-w-full divide-y divide-slate-100 text-sm lg:table">
                   <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
                     <tr>
                       <th className="px-4 py-3">日期</th>

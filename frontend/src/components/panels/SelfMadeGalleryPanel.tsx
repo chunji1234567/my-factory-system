@@ -180,7 +180,7 @@ export default function SelfMadeGalleryPanel({
             <h2 className="text-xl">
               <span className="font-semibold text-slate-900">自产外壳图库</span>
             </h2>
-            <p className="text-sm text-slate-500">共 {filtered.length} 款，自产件库存一目了然</p>
+            <p className="text-sm text-slate-500">共 {filtered.length}</p>
           </div>
           {loading && <span className="text-sm text-slate-500">加载中…</span>}
         </div>

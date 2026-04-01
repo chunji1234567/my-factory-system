@@ -1,4 +1,5 @@
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+const DEV_SERVER_PORTS = new Set(['5173', '4173']);
 const FALLBACK_API_BASE = 'http://127.0.0.1:8000';
 
 function resolveApiBaseUrl() {
@@ -6,9 +7,13 @@ function resolveApiBaseUrl() {
     return import.meta.env.VITE_API_BASE_URL;
   }
   if (typeof window !== 'undefined') {
-    const { origin, hostname } = window.location;
+    const { origin, hostname, protocol, port } = window.location;
     if (!LOCAL_HOSTS.has(hostname)) {
       return origin;
+    }
+    if (DEV_SERVER_PORTS.has(port)) {
+      const apiPort = import.meta.env.VITE_API_PORT || '8000';
+      return `${protocol}//${hostname}:${apiPort}`;
     }
   }
   return FALLBACK_API_BASE;

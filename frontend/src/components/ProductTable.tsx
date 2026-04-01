@@ -30,7 +30,7 @@ export default function ProductTable({
         </div>
       </div>
 
-      <div className="mt-6 overflow-hidden rounded-xl border border-slate-100">
+      <div className="mt-6 hidden overflow-hidden rounded-xl border border-slate-100 lg:block">
         <table className="min-w-full divide-y divide-slate-100 text-sm">
           <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
             <tr>
@@ -100,6 +100,74 @@ export default function ProductTable({
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="mt-6 space-y-3 lg:hidden">
+        {loading && (
+          <p className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
+            正在加载库存…
+          </p>
+        )}
+        {!loading &&
+          products.map((product) => {
+            const isLowStock = product.stockQuantity < product.minStock;
+            const isSelected = selectionEnabled ? selectedIds?.has(product.id) : false;
+            return (
+              <div key={product.id} className="rounded-2xl border border-slate-200 p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">内部编号</p>
+                    <p className={`font-mono text-sm ${isLowStock ? 'text-rose-600 font-semibold' : 'text-slate-800'}`}>
+                      {product.internalCode}
+                    </p>
+                  </div>
+                  {selectionEnabled && (
+                    <label className="flex items-center gap-2 text-xs text-slate-500">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500"
+                        checked={Boolean(isSelected)}
+                        onChange={() => onToggleSelect?.(product)}
+                      />
+                      选择
+                    </label>
+                  )}
+                </div>
+                <p className="mt-2 text-base font-semibold text-slate-900">{product.modelName}</p>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-slate-600">
+                  <div>
+                    <p className="text-xs text-slate-400">当前库存</p>
+                    <p className={`text-lg font-semibold ${isLowStock ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      {product.stockQuantity.toLocaleString()}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">安全库存</p>
+                    <p>{product.minStock.toLocaleString()}</p>
+                  </div>
+                </div>
+                {selectionEnabled && (
+                  <div className="mt-4">
+                    <label className="text-xs text-slate-500">调整数量</label>
+                    <input
+                      type="number"
+                      min="0"
+                      disabled={!isSelected}
+                      value={(quantities && quantities[product.id]) ?? ''}
+                      onChange={(evt) => onQuantityChange?.(product.id, evt.target.value)}
+                      className="mt-1 w-full rounded-full border border-slate-200 px-3 py-2 text-right text-sm disabled:bg-slate-50"
+                      placeholder="输入数量"
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        {!loading && products.length === 0 && (
+          <p className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
+            当前分类暂无产品
+          </p>
+        )}
       </div>
     </section>
   );

@@ -29,7 +29,15 @@ if not SECRET_KEY:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False').lower() in {'1', 'true', 'yes'}
 
-ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if not DEBUG else []
+if DEBUG:
+    default_hosts = ['localhost', '127.0.0.1', '0.0.0.0']
+    dev_host = os.environ.get('DJANGO_DEV_HOST')
+    if dev_host:
+        default_hosts.append(dev_host)
+    ALLOWED_HOSTS = default_hosts
+else:
+    raw_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
+    ALLOWED_HOSTS = [host.strip() for host in raw_hosts.split(',') if host.strip()]
 
 
 # Application definition

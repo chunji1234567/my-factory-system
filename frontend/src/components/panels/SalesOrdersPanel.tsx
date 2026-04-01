@@ -419,7 +419,7 @@ export default function SalesOrdersPanel({
           {loading && <span className="text-sm text-slate-500">加载中…</span>}
         </div>
         <div className="mt-4 overflow-hidden rounded-xl border border-slate-100">
-          <table className="min-w-full divide-y divide-slate-100 text-sm">
+          <table className="hidden min-w-full divide-y divide-slate-100 text-sm lg:table">
             <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-slate-500">
               <tr>
                 <th className="px-4 py-3">客户</th>
@@ -552,7 +552,93 @@ export default function SalesOrdersPanel({
             </tbody>
           </table>
         </div>
-        <div className="mt-4">
+        <div className="mt-4 space-y-3 lg:hidden">
+          {pagedOrders.map((order) => (
+            <div key={order.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">{order.order_no}</p>
+                  <p className="text-xs text-slate-500">{order.partner_name || `客户#${order.partner}`}</p>
+                </div>
+                <StatusBadge
+                  kind="sales"
+                  status={order.status}
+                  label={STATUS_OPTIONS.find((option) => option.value === order.status)?.label || order.status}
+                />
+              </div>
+              <div className="mt-3 space-y-2">
+                {order.items.slice(0, 2).map((item) => (
+                  <div key={item.id} className="rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600">
+                    <p className="font-semibold text-slate-800">
+                      {item.custom_product_name} × {item.quantity}
+                    </p>
+                    {item.detail_description && (
+                      <p className="mt-1 whitespace-pre-line text-slate-500">{item.detail_description}</p>
+                    )}
+                  </div>
+                ))}
+                {order.items.length > 2 && <p className="text-xs text-slate-400">…共 {order.items.length} 条明细</p>}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                <span>金额：{formatMoney(order.total_amount)}</span>
+                <span>创建：{formatDate(order.created_at)}</span>
+              </div>
+              {showActions && (
+                <div className="mt-3 flex gap-2 text-xs font-semibold">
+                  {canCreateEvents && (
+                    <button
+                      className="flex-1 rounded-full border border-slate-200 px-3 py-1 text-slate-600"
+                      onClick={() => {
+                        setEventModalOrderId(order.id);
+                        setEventType('REMARK');
+                        setEventContent('');
+                        setEventError(null);
+                      }}
+                    >
+                      记录事件
+                    </button>
+                  )}
+                  {isManager && (
+                    <>
+                      <button
+                        className="flex-1 rounded-full border border-slate-200 px-3 py-1 text-slate-600"
+                        onClick={() => openEditModal(order)}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        className="flex-1 rounded-full border border-rose-200 px-3 py-1 text-rose-600"
+                        onClick={() => handleDelete(order.id)}
+                      >
+                        删除
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+              {order.events?.length ? (
+                <div className="mt-3 space-y-2 text-xs text-slate-600">
+                  {order.events.slice(0, 1).map((event) => (
+                    <div key={event.id} className="rounded-xl border border-slate-200 p-3">
+                      <div className="flex items-center justify-between text-slate-500">
+                        <span>{EVENT_TYPES.find((type) => type.value === event.event_type)?.label || event.event_type}</span>
+                        <span>{formatDate(event.created_at)}</span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-line">{event.content}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-xs text-slate-400">暂无事件</p>
+              )}
+            </div>
+          ))}
+          <div className="mt-4">
+            <Pagination page={page} pageSize={pageSize} total={filteredOrders.length} onPageChange={setPage} />
+          </div>
+        </div>
+
+        <div className="mt-4 hidden lg:block">
           <Pagination page={page} pageSize={pageSize} total={filteredOrders.length} onPageChange={setPage} />
         </div>
       </section>
