@@ -93,10 +93,7 @@ function App() {
     return <div className="flex min-h-screen items-center justify-center text-slate-600">当前角色暂无可用面板，请联系管理员。</div>;
   }
 
-  const inventoryProducts = useMemo(
-    () => mapProducts(productsQuery.data),
-    [productsQuery.data],
-  );
+  const inventoryProducts = mapProducts(productsQuery.data);
   const categories = categoriesQuery.data;
 
   return (
