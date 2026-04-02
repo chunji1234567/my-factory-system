@@ -1,4 +1,4 @@
-import type { OrderSummary } from '../mockData';
+import type { OrderSummary } from '../types';
 
 interface OrderTableProps {
   orders: OrderSummary[];

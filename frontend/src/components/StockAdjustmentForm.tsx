@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { ProductItem } from '../mockData';
+import type { InventoryProduct } from '../types';
 
 const adjustmentOptions = [
   { value: 'MANUAL_IN', label: '手动入库/盘盈' },
@@ -9,7 +9,7 @@ const adjustmentOptions = [
 ];
 
 interface Props {
-  products: ProductItem[];
+  products: InventoryProduct[];
   onSuccess?: () => void;
 }
 

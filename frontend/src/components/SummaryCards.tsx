@@ -1,20 +1,20 @@
 import { memo } from 'react';
-import type { PanelKey } from '../types';
 import type {
+  FinanceTransactionListItem,
+  InventoryProduct,
   OrderSummary,
-  ProductItem,
-  PurchaseOrderMock,
-  FinanceTransactionMock,
-  ShippingLogMock,
-} from '../mockData';
+  PanelKey,
+  PurchaseOrderSummary,
+  ShippingLogSummary,
+} from '../types';
 
 interface SummaryCardsProps {
   active: PanelKey;
   salesOrders: OrderSummary[];
-  purchaseOrders: PurchaseOrderMock[];
-  products: ProductItem[];
-  transactions: FinanceTransactionMock[];
-  shippingLogs: ShippingLogMock[];
+  purchaseOrders: PurchaseOrderSummary[];
+  products: InventoryProduct[];
+  transactions: FinanceTransactionListItem[];
+  shippingLogs: ShippingLogSummary[];
 }
 
 type Card = { title: string; value: string | number; note: string };

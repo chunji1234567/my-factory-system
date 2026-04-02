@@ -5,12 +5,11 @@ import ProductForm from '../ProductForm';
 import Modal from '../common/Modal';
 import { api } from '../../api/client';
 import type { CategoryResponse } from '../../hooks/useCategories';
-import type { ProductItem } from '../../mockData';
-import type { StockAdjustmentType } from '../../types';
+import type { InventoryProduct, StockAdjustmentType } from '../../types';
 import { stockAdjustmentOptions } from '../../types';
 
 interface Props {
-  products: ProductItem[];
+  products: InventoryProduct[];
   categories: CategoryResponse[];
   loading?: boolean;
   error?: string | null;
@@ -75,7 +74,7 @@ export default function InventoryPanel({
 
   const grouped = useMemo(() => {
     if (!filtered.length) return [];
-    const map = new Map<number, { category: CategoryResponse; items: ProductItem[] }>();
+    const map = new Map<number, { category: CategoryResponse; items: InventoryProduct[] }>();
     filtered.forEach((item) => {
       const cat = rawCategories.find((c) => c.id === item.categoryId) || {
         id: item.categoryId ?? 0,
@@ -91,12 +90,12 @@ export default function InventoryPanel({
   }, [filtered, rawCategories]);
 
   const selectedProducts = useMemo(() => {
-    if (!selectedIds.size) return [] as ProductItem[];
+    if (!selectedIds.size) return [] as InventoryProduct[];
     const ids = new Set(selectedIds);
     return products.filter((item) => ids.has(item.id));
   }, [products, selectedIds]);
 
-  const handleToggleProduct = (product: ProductItem) => {
+  const handleToggleProduct = (product: InventoryProduct) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(product.id)) {

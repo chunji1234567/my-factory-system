@@ -9,13 +9,12 @@ import PartnerManagementPanel from './components/panels/PartnerManagementPanel';
 import SelfMadeGalleryPanel from './components/panels/SelfMadeGalleryPanel';
 import LoginForm from './components/LoginForm';
 import { useAuth } from './context/AuthContext';
-import { mockOrders, mockProducts } from './mockData';
 import { useProducts } from './hooks/useProducts';
 import { useCategories } from './hooks/useCategories';
 import { useSalesOrders } from './hooks/useSalesOrders';
 import { usePurchaseOrders } from './hooks/usePurchaseOrders';
 import { usePartners } from './hooks/usePartners';
-import { panelConfig, type PanelKey } from './types';
+import { panelConfig, type PanelKey, type InventoryProduct } from './types';
 
 const panelKeysList = Object.keys(panelConfig) as PanelKey[];
 const ACTIVE_PANEL_STORAGE_KEY = 'mfs-active-panel';
@@ -94,9 +93,11 @@ function App() {
     return <div className="flex min-h-screen items-center justify-center text-slate-600">当前角色暂无可用面板，请联系管理员。</div>;
   }
 
-  const products = productsQuery.data.length ? mapProducts(productsQuery.data) : mockProducts;
+  const inventoryProducts = useMemo(
+    () => mapProducts(productsQuery.data),
+    [productsQuery.data],
+  );
   const categories = categoriesQuery.data;
-  const salesOrders = salesOrdersQuery.data.length ? mapSalesOrders(salesOrdersQuery.data) : mockOrders;
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -135,7 +136,7 @@ function App() {
       <main className="mx-auto max-w-6xl px-4 py-10">
         {activePanel === 'inventory' && (
           <InventoryPanel
-            products={products}
+            products={inventoryProducts}
             loading={productsQuery.loading}
             error={productsQuery.error}
             onRefreshProducts={productsQuery.reload}
@@ -210,10 +211,7 @@ function App() {
 
 export default App;
 
-function mapProducts(data: ReturnType<typeof useProducts>['data']) {
-  if (!data.length) {
-    return mockProducts;
-  }
+function mapProducts(data: ReturnType<typeof useProducts>['data']): InventoryProduct[] {
   return data.map((item) => ({
     id: item.id,
     internalCode: item.internal_code,
@@ -223,20 +221,5 @@ function mapProducts(data: ReturnType<typeof useProducts>['data']) {
     category: item.category_detail?.name ?? '未分类',
     categoryType: item.category_detail?.category_type,
     categoryId: item.category,
-  }));
-}
-
-function mapSalesOrders(data: ReturnType<typeof useSalesOrders>['data']) {
-  if (!data.length) {
-    return mockOrders;
-  }
-  return data.map((item) => ({
-    id: item.id,
-    partner: item.partner_name ?? `客户#${item.partner}`,
-    orderNo: item.order_no,
-    status: item.status,
-    totalAmount: item.total_amount,
-    paidAmount: item.paid_amount,
-    createdAt: item.created_at,
   }));
 }

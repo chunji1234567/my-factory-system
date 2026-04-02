@@ -52,3 +52,52 @@ export const stockAdjustmentOptions = [
   { value: 'MANUAL_OUT', label: '出库/盘亏', shortLabel: '出库' },
   { value: 'PRODUCE_IN', label: '生产入库', shortLabel: '生产入库' },
 ] as const satisfies ReadonlyArray<{ value: StockAdjustmentType; label: string; shortLabel: string }>;
+
+export interface InventoryProduct {
+  id: number;
+  internalCode: string;
+  modelName: string;
+  stockQuantity: number;
+  minStock: number;
+  category: string;
+  categoryType?: string;
+  categoryId?: number;
+}
+
+export interface OrderSummary {
+  id: number;
+  partner: string;
+  orderNo: string;
+  status: string;
+  totalAmount: number;
+  paidAmount: number;
+  createdAt: string;
+}
+
+export interface FinanceTransactionListItem {
+  id: number;
+  partner: string;
+  amount: number;
+  note: string;
+  createdAt: string;
+}
+
+export interface PurchaseOrderSummary {
+  id: number;
+  partner: string;
+  orderNo: string;
+  status: string;
+  totalAmount: number;
+  createdAt: string;
+}
+
+export interface ShippingLogSummary {
+  id: number;
+  orderNo: string;
+  partner: string;
+  product: string;
+  quantity: number;
+  shippedQuantity: number;
+  shippedAt: string;
+  status: string;
+}

@@ -1,11 +1,11 @@
-import type { ProductItem } from '../mockData';
+import type { InventoryProduct } from '../types';
 
 interface ProductTableProps {
-  products: ProductItem[];
+  products: InventoryProduct[];
   loading?: boolean;
   title?: string;
   selectedIds?: Set<number>;
-  onToggleSelect?: (product: ProductItem) => void;
+  onToggleSelect?: (product: InventoryProduct) => void;
   quantities?: Record<number, string>;
   onQuantityChange?: (productId: number, value: string) => void;
 }

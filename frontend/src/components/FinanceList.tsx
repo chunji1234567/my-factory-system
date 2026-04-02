@@ -1,7 +1,7 @@
-import type { FinanceTransactionMock } from '../mockData';
+import type { FinanceTransactionListItem } from '../types';
 
 interface FinanceListProps {
-  transactions: FinanceTransactionMock[];
+  transactions: FinanceTransactionListItem[];
 }
 
 export default function FinanceList({ transactions }: FinanceListProps) {
