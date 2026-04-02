@@ -28,9 +28,27 @@ const AuthContext = createContext<AuthState | undefined>(undefined);
 const ACCESS_KEY = 'mfs_access_token';
 const REFRESH_KEY = 'mfs_refresh_token';
 
+function getInitialAccessToken() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const token = localStorage.getItem(ACCESS_KEY);
+  if (token) {
+    setAuthToken(token);
+  }
+  return token;
+}
+
+function getInitialRefreshToken() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  return localStorage.getItem(REFRESH_KEY);
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [accessToken, setAccessToken] = useState<string | null>(() => localStorage.getItem(ACCESS_KEY));
-  const [refreshToken, setRefreshToken] = useState<string | null>(() => localStorage.getItem(REFRESH_KEY));
+  const [accessToken, setAccessToken] = useState<string | null>(getInitialAccessToken);
+  const [refreshToken, setRefreshToken] = useState<string | null>(getInitialRefreshToken);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<UserProfile | null>(null);
