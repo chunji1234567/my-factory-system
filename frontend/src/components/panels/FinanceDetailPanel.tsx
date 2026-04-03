@@ -2,6 +2,8 @@ import { FormEvent, useMemo, useState } from 'react';
 import { useFinanceTransactions, FinanceTransactionType } from '../../hooks/useFinanceTransactions';
 import { usePartners } from '../../hooks/usePartners';
 import { api } from '../../api/client';
+import NavbarButton from '../common/NavbarButton';
+import FilterBar from '../common/FilterBar';
 
 function formatPartnerDisplay(partnerId: number, partnerName?: string | null) {
   if (partnerName) {
@@ -255,13 +257,32 @@ export default function FinanceDetailPanel() {
         </button>
       </div>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap gap-3">
-          <div className="flex-1 min-w-[200px]">
-            <label className="text-xs font-semibold text-slate-500">合作方（输入名称或 ID）</label>
+      <FilterBar
+        actions={
+          <>
+            <NavbarButton
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setFilterPartnerInput('');
+                setFilterPartnerId(null);
+                setFilterDateFrom('');
+                setFilterDateTo('');
+              }}
+            >
+              重置筛选
+            </NavbarButton>
+            <NavbarButton type="button" variant="outline" onClick={() => console.info('TODO: 导出财务流水')}>
+              导出流水（即将支持）
+            </NavbarButton>
+          </>
+        }
+      >
+        <FilterBar.Field label="合作方">
+          <>
             <input
               list="finance-filter-partners"
-              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
+              className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
               value={filterPartnerInput}
               onChange={(event) => handleFilterPartnerInputChange(event.target.value)}
               placeholder="例如：泰国客户 / #12"
@@ -271,50 +292,25 @@ export default function FinanceDetailPanel() {
                 <option key={suggestion} value={suggestion} />
               ))}
             </datalist>
-          </div>
-          <div className="flex flex-1 flex-col">
-            <label className="text-xs font-semibold text-slate-500">开始日期</label>
-            <input
-              type="date"
-              className="mt-1 rounded-full border border-slate-200 px-4 py-2 text-sm"
-              value={filterDateFrom}
-              onChange={(event) => setFilterDateFrom(event.target.value)}
-            />
-          </div>
-          <div className="flex flex-1 flex-col">
-            <label className="text-xs font-semibold text-slate-500">结束日期</label>
-            <input
-              type="date"
-              className="mt-1 rounded-full border border-slate-200 px-4 py-2 text-sm"
-              value={filterDateTo}
-              onChange={(event) => setFilterDateTo(event.target.value)}
-            />
-          </div>
-          <div className="flex flex-wrap items-end gap-2">
-            <button
-              type="button"
-              className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-              onClick={() => {
-                setFilterPartnerInput('');
-                setFilterPartnerId(null);
-                setFilterDateFrom('');
-                setFilterDateTo('');
-              }}
-            >
-              重置筛选
-            </button>
-            <button
-              type="button"
-              className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-              onClick={() => {
-                console.info('TODO: 导出财务流水');
-              }}
-            >
-              导出流水（即将支持）
-            </button>
-          </div>
-        </div>
-      </section>
+          </>
+        </FilterBar.Field>
+        <FilterBar.Field label="开始日期">
+          <input
+            type="date"
+            className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
+            value={filterDateFrom}
+            onChange={(event) => setFilterDateFrom(event.target.value)}
+          />
+        </FilterBar.Field>
+        <FilterBar.Field label="结束日期">
+          <input
+            type="date"
+            className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
+            value={filterDateTo}
+            onChange={(event) => setFilterDateTo(event.target.value)}
+          />
+        </FilterBar.Field>
+      </FilterBar>
 
       {editingId && (
         <section className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">

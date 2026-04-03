@@ -4,6 +4,8 @@ import type { PartnerResponse } from '../../hooks/usePartners';
 import { api } from '../../api/client';
 import Pagination from '../common/Pagination';
 import StatusBadge from '../common/StatusBadge';
+import NavbarButton from '../common/NavbarButton';
+import FilterBar from '../common/FilterBar';
 
 interface Props {
   orders: PurchaseOrderResponse[];
@@ -136,13 +138,26 @@ export default function WarehouseReceivingPanel({ orders, partners, loading, err
   return (
     <div className="mt-8 space-y-6">
       {error && <p className="text-sm text-rose-600">{error}</p>}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap gap-3">
-          <div className="flex-1 min-w-[200px]">
-            <label className="text-xs font-semibold text-slate-500">供应商</label>
+      <FilterBar
+        actions={
+          <NavbarButton
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setSupplierFilter('');
+              setSelectedSupplierId(null);
+              setStatusFilter('');
+            }}
+          >
+            重置筛选
+          </NavbarButton>
+        }
+      >
+        <FilterBar.Field label="供应商">
+          <>
             <input
               list="warehouse-suppliers"
-              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
+              className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
               value={supplierFilter}
               onChange={(event) => {
                 const value = event.target.value;
@@ -157,19 +172,9 @@ export default function WarehouseReceivingPanel({ orders, partners, loading, err
                 <option key={suggestion} value={suggestion} />
               ))}
             </datalist>
-          </div>
-          <button
-            className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-            onClick={() => {
-              setSupplierFilter('');
-              setSelectedSupplierId(null);
-              setStatusFilter('');
-            }}
-          >
-            重置过滤
-          </button>
-        </div>
-      </section>
+          </>
+        </FilterBar.Field>
+      </FilterBar>
 
       <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">

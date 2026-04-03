@@ -4,6 +4,8 @@ import { useShippingLogs, ShippingLogResponse } from '../../hooks/useShippingLog
 import { api } from '../../api/client';
 import Pagination from '../common/Pagination';
 import StatusBadge from '../common/StatusBadge';
+import NavbarButton from '../common/NavbarButton';
+import FilterBar from '../common/FilterBar';
 
 const STATUS_OPTIONS = [
   { value: 'ORDERED', label: '已下单' },
@@ -335,13 +337,25 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
       {formError && <p className="text-sm text-rose-600">{formError}</p>}
       {successMessage && <p className="text-sm text-emerald-600">{successMessage}</p>}
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="min-w-[220px] flex-1">
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">客户筛选</label>
+      <FilterBar
+        actions={
+          <NavbarButton
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setCustomerFilter('');
+              setSelectedCustomerId(null);
+            }}
+          >
+            重置筛选
+          </NavbarButton>
+        }
+      >
+        <FilterBar.Field label="客户">
+          <>
             <input
               list="shipping-customers"
-              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-700"
+              className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-700"
               placeholder="输入客户名称或 #ID"
               value={customerFilter}
               onChange={(event) => {
@@ -356,19 +370,9 @@ export default function ShippingPanel({ orders, ordersLoading, ordersError, onRe
                 <option key={suggestion} value={suggestion} />
               ))}
             </datalist>
-          </div>
-          <button
-            type="button"
-            className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-            onClick={() => {
-              setCustomerFilter('');
-              setSelectedCustomerId(null);
-            }}
-          >
-            重置过滤
-          </button>
-        </div>
-      </section>
+          </>
+        </FilterBar.Field>
+      </FilterBar>
 
       <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-4">

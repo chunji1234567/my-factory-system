@@ -6,6 +6,8 @@ import { useCustomerPreferredProducts } from '../../hooks/useCustomerPreferredPr
 import { api } from '../../api/client';
 import Pagination from '../common/Pagination';
 import StatusBadge from '../common/StatusBadge';
+import NavbarButton from '../common/NavbarButton';
+import FilterBar from '../common/FilterBar';
 
 interface Props {
   orders: SalesOrderResponse[];
@@ -367,13 +369,26 @@ export default function SalesOrdersPanel({
         )}
       </div>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap gap-3">
-          <div className="flex-1 min-w-[200px]">
-            <label className="text-xs font-semibold text-slate-500">客户</label>
+      <FilterBar
+        actions={
+          <NavbarButton
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setCustomerInput('');
+              setSelectedCustomerId(null);
+              setStatusFilter('');
+            }}
+          >
+            重置筛选
+          </NavbarButton>
+        }
+      >
+        <FilterBar.Field label="客户">
+          <>
             <input
               list="sales-customers"
-              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
+              className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
               value={customerInput}
               onChange={(event) => handlePartnerFilterChange(event.target.value)}
               placeholder="输入名称或 #ID"
@@ -383,35 +398,23 @@ export default function SalesOrdersPanel({
                 <option key={suggestion} value={suggestion} />
               ))}
             </datalist>
-          </div>
-          <div className="flex flex-col">
-            <label className="text-xs font-semibold text-slate-500">状态</label>
-            <select
-              className="mt-1 rounded-full border border-slate-200 px-3 py-2 text-sm"
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as SalesStatus | '')}
-            >
-              <option value="">全部状态</option>
-              {STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button
-            type="button"
-            className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-            onClick={() => {
-              setCustomerInput('');
-              setSelectedCustomerId(null);
-              setStatusFilter('');
-            }}
+          </>
+        </FilterBar.Field>
+        <FilterBar.Field className="max-w-[180px]" label="状态">
+          <select
+            className="w-full rounded-full border border-slate-200 px-3 py-2 text-sm"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value as SalesStatus | '')}
           >
-            重置筛选
-          </button>
-        </div>
-      </section>
+            <option value="">全部状态</option>
+            {STATUS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </FilterBar.Field>
+      </FilterBar>
 
       <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">

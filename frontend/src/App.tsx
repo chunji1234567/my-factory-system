@@ -10,6 +10,7 @@ import SelfMadeGalleryPanel from './components/panels/SelfMadeGalleryPanel';
 import LoginForm from './components/LoginForm';
 import { useAuth } from './context/AuthContext';
 import { useProducts } from './hooks/useProducts';
+import NavbarButton from './components/common/NavbarButton';
 import { useCategories } from './hooks/useCategories';
 import { useSalesOrders } from './hooks/useSalesOrders';
 import { usePurchaseOrders } from './hooks/usePurchaseOrders';
@@ -107,25 +108,14 @@ function App() {
           <div className="flex flex-wrap items-center gap-3 text-sm font-medium text-slate-600">
             <nav className="flex flex-wrap gap-2">
               {allowedPanels.map((key) => (
-                <button
-                  key={key}
-                  onClick={() => setActivePanel(key)}
-                  className={`rounded-full px-4 py-2 transition-colors ${
-                    activePanel === key
-                      ? 'bg-slate-900 text-white'
-                      : 'bg-slate-100 hover:bg-slate-200'
-                  }`}
-                >
+                <NavbarButton key={key} active={activePanel === key} onClick={() => setActivePanel(key)}>
                   {panelConfig[key].title}
-                </button>
+                </NavbarButton>
               ))}
             </nav>
-            <button
-              onClick={logout}
-              className="rounded-full border border-slate-200 px-4 py-2 text-slate-600 hover:bg-slate-50"
-            >
+            <NavbarButton variant="outline" onClick={logout}>
               退出
-            </button>
+            </NavbarButton>
           </div>
         </div>
       </header>

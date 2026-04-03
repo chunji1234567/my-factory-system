@@ -1,6 +1,7 @@
 import { FormEvent, useMemo, useState } from 'react';
 import { api } from '../../api/client';
 import type { PartnerResponse } from '../../hooks/usePartners';
+import NavbarButton from '../common/NavbarButton';
 
 interface Props {
   partners: PartnerResponse[];
@@ -507,24 +508,24 @@ export default function PartnerManagementPanel({ partners, loading, error, onRef
                   />
                 </label>
                 <div className="flex gap-2">
-                  <button
+                  <NavbarButton
                     type="button"
-                    className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 disabled:opacity-50"
+                    variant="outline"
                     onClick={handleApplyLedgerFilters}
                     disabled={!selectedPartner || detailLoading}
                   >
                     筛选
-                  </button>
-                  <button
+                  </NavbarButton>
+                  <NavbarButton
                     type="button"
-                    className="rounded-full border border-slate-200 px-3 py-1 text-slate-600 disabled:opacity-50"
+                    variant="outline"
                     onClick={handleResetLedgerFilters}
                     disabled={
                       (!ledgerFilterFrom && !ledgerFilterTo && !hasAppliedLedgerFilters) || !selectedPartner || detailLoading
                     }
                   >
-                    重置
-                  </button>
+                    重置筛选
+                  </NavbarButton>
                 </div>
               </div>
               <div className="overflow-hidden rounded-xl border border-slate-100">

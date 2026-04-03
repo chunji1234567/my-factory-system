@@ -5,6 +5,8 @@ import type { PartnerResponse } from '../../hooks/usePartners';
 import { api } from '../../api/client';
 import Pagination from '../common/Pagination';
 import StatusBadge from '../common/StatusBadge';
+import NavbarButton from '../common/NavbarButton';
+import FilterBar from '../common/FilterBar';
 
 interface Props {
   orders: PurchaseOrderResponse[];
@@ -297,13 +299,26 @@ export default function PurchasePanel({
         )}
       </div>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap gap-3">
-          <div className="flex-1 min-w-[200px]">
-            <label className="text-xs font-semibold text-slate-500">供应商</label>
+      <FilterBar
+        actions={
+          <NavbarButton
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setSupplierInput('');
+              setSelectedSupplierId(null);
+              setFilterStatus('');
+            }}
+          >
+            重置筛选
+          </NavbarButton>
+        }
+      >
+        <FilterBar.Field label="供应商">
+          <>
             <input
               list="purchase-suppliers"
-              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
+              className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm"
               value={supplierInput}
               onChange={(event) => handleSupplierFilterChange(event.target.value)}
               placeholder="输入名称或 #ID"
@@ -313,35 +328,23 @@ export default function PurchasePanel({
                 <option key={suggestion} value={suggestion} />
               ))}
             </datalist>
-          </div>
-          <div className="flex flex-col">
-            <label className="text-xs font-semibold text-slate-500">状态</label>
-            <select
-              className="mt-1 rounded-full border border-slate-200 px-3 py-2 text-sm"
-              value={filterStatus}
-              onChange={(event) => setFilterStatus(event.target.value)}
-            >
-              <option value="">全部状态</option>
-              {STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button
-            type="button"
-            className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-            onClick={() => {
-              setSupplierInput('');
-              setSelectedSupplierId(null);
-              setFilterStatus('');
-            }}
+          </>
+        </FilterBar.Field>
+        <FilterBar.Field label="状态">
+          <select
+            className="w-full rounded-full border border-slate-200 px-3 py-2 text-sm"
+            value={filterStatus}
+            onChange={(event) => setFilterStatus(event.target.value)}
           >
-            重置筛选
-          </button>
-        </div>
-      </section>
+            <option value="">全部状态</option>
+            {STATUS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </FilterBar.Field>
+      </FilterBar>
 
       <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
