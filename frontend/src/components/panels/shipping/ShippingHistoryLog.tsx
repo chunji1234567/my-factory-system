@@ -1,11 +1,21 @@
-import React from 'react';
+import Pagination from '../../common/Pagination';
+import { usePaginatedFilter } from '../../../hooks/usePaginatedFilter';
 
 interface ShippingHistoryLogProps {
   logs: any[];
   loading: boolean;
 }
 
+const PAGE_SIZE = 8;
+
 export const ShippingHistoryLog = ({ logs = [], loading }: ShippingHistoryLogProps) => {
+  const { page, setPage, pagedData: pagedLogs, total } = usePaginatedFilter<any>({
+    data: logs,
+    pageSize: PAGE_SIZE,
+  });
+
+  const hasLogs = total > 0;
+
   return (
     <section className="bg-white rounded-[2rem] md:rounded-[3rem] border border-slate-100 shadow-sm overflow-hidden animate-in fade-in duration-700">
       {/* 头部区域 */}
@@ -36,7 +46,7 @@ export const ShippingHistoryLog = ({ logs = [], loading }: ShippingHistoryLogPro
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
-            {logs.map((log: any) => (
+            {hasLogs ? pagedLogs.map((log: any) => (
               <tr key={log.id} className="hover:bg-slate-50/50 transition-colors group">
                 <td className="px-6 py-4 align-top">
                   <p className="font-bold text-slate-800">{log.partner_name}</p>
@@ -61,14 +71,20 @@ export const ShippingHistoryLog = ({ logs = [], loading }: ShippingHistoryLogPro
                   </div>
                 </td>
               </tr>
-            ))}
+            )) : (
+              <tr>
+                <td colSpan={4} className="px-6 py-10 text-center text-slate-400 font-semibold">
+                  暂无发货流水
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
 
       {/* --- 2. 移动端视图 (md 以下) --- */}
       <div className="md:hidden divide-y divide-slate-50">
-        {logs.length > 0 ? logs.map((log: any) => (
+        {hasLogs ? pagedLogs.map((log: any) => (
           <div key={log.id} className="p-5 space-y-4 active:bg-slate-50 transition-colors">
             <div className="flex justify-between items-start">
               <div className="flex-1 min-w-0">
@@ -99,9 +115,8 @@ export const ShippingHistoryLog = ({ logs = [], loading }: ShippingHistoryLogPro
         )}
       </div>
 
-      {/* 底部加载更多占位 (可选) */}
-      <div className="p-6 bg-slate-50/30 text-center border-t border-slate-50">
-        <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.3em]">End of Recent Activity</p>
+      <div className="border-t border-slate-50 bg-slate-50/30">
+        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onPageChange={setPage} />
       </div>
     </section>
   );

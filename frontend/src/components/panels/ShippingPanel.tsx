@@ -1,20 +1,21 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { api } from '../../api/client';
 import FilterBar from '../common/FilterBar';
 import NavbarButton from '../common/NavbarButton';
 import Pagination from '../common/Pagination';
 import Modal from '../common/Modal';
 import StatusBadge from '../common/StatusBadge';
+import { usePaginatedFilter } from '../../hooks/usePaginatedFilter';
 
 // 引入重构后的三大零件
 import ShippingStatusTable from './shipping/ShippingStatusTable';
 import { ShippingEntryForm } from './shipping/ShippingEntryForm';
 import { ShippingHistoryLog } from './shipping/ShippingHistoryLog';
 
+type ShippingFilters = { status: string; customerInput: string };
+
 export default function ShippingPanel({ orders, onRefreshOrders, loading, error, logs, logsLoading }: any) {
   // --- 1. 状态管理 ---
-  const [filters, setFilters] = useState({ status: '', customerInput: '' });
-  const [page, setPage] = useState(1);
   const [isSavingId, setIsSavingId] = useState<number | null>(null);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
   
@@ -27,19 +28,34 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
   ]);
 
   // --- 2. 数据处理逻辑 ---
-  const filteredOrders = useMemo(() => {
-    return (orders || []).filter((o: any) => {
-      const matchStatus = !filters.status || o.status === filters.status;
-      const matchCustomer = !filters.customerInput || 
-        o.partner_name?.toLowerCase().includes(filters.customerInput.toLowerCase()) ||
-        String(o.partner).includes(filters.customerInput);
-      return matchStatus && matchCustomer;
-    });
-  }, [orders, filters]);
+  const filterFn = useCallback((order: any, currentFilters: ShippingFilters) => {
+    const matchStatus = !currentFilters.status || order.status === currentFilters.status;
+    if (currentFilters.customerInput) {
+      const keyword = currentFilters.customerInput.toLowerCase();
+      return (
+        matchStatus && (
+          order.partner_name?.toLowerCase().includes(keyword) ||
+          String(order.partner).includes(currentFilters.customerInput)
+        )
+      );
+    }
+    return matchStatus;
+  }, []);
 
-  const pagedOrders = useMemo(() => {
-    return filteredOrders.slice((page - 1) * 30, page * 30);
-  }, [filteredOrders, page]);
+  const {
+    filters,
+    setFilters,
+    resetFilters,
+    page,
+    setPage,
+    pagedData: pagedOrders,
+    total: filteredTotal,
+  } = usePaginatedFilter<any, ShippingFilters>({
+    data: orders || [],
+    pageSize: 30,
+    initialFilters: { status: '', customerInput: '' },
+    filterFn,
+  });
 
   const activeOrder = useMemo(() => 
     orders?.find((o: any) => o.id === selectedOrderId), 
@@ -112,7 +128,7 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
       {/* SECTION 1: 监控与筛选区 */}
       <div className="space-y-6">
         <FilterBar actions={
-          <NavbarButton variant="outline" className="font-bold" onClick={() => setFilters({ status: '', customerInput: '' })}>
+          <NavbarButton variant="outline" className="font-bold" onClick={resetFilters}>
             重置全部筛选
           </NavbarButton>
         }>
@@ -121,7 +137,7 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
               className="w-full rounded-full border border-slate-200 px-6 py-4 text-base font-bold outline-none focus:border-slate-900 transition-all placeholder:text-slate-300"
               placeholder="输入关键词进行检索..."
               value={filters.customerInput}
-              onChange={(e) => { setFilters({ ...filters, customerInput: e.target.value }); setPage(1); }}
+              onChange={(e) => setFilters(prev => ({ ...prev, customerInput: e.target.value }))}
             />
           </FilterBar.Field>
         </FilterBar>
@@ -143,11 +159,11 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
             onRowClick={(id) => setSelectedOrderId(id)}
             isSaving={isSavingId}
             activeFilter={filters.status}
-            onFilterChange={(val) => { setFilters({ ...filters, status: val }); setPage(1); }}
+            onFilterChange={(val) => setFilters(prev => ({ ...prev, status: val }))}
           />
         </div>
 
-        <Pagination page={page} total={filteredOrders.length} onPageChange={setPage} />
+        <Pagination page={page} total={filteredTotal} onPageChange={setPage} />
       </div>
 
       <hr className="border-slate-100" />
