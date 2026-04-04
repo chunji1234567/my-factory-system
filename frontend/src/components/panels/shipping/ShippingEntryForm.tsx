@@ -15,7 +15,7 @@ interface ShippingEntryFormProps {
   onDraftChange: (index: number, field: keyof ShippingEntryDraft, value: string) => void;
   onAddRow: () => void;
   onRemoveRow: (index: number) => void;
-  onRequestConfirm: (records: Array<{ orderId: number; itemId: number; quantity: number; trackingNo?: string }>) => void;
+  onSubmit: (records: Array<{ orderId: number; itemId: number; quantity: number; trackingNo?: string }>) => void;
   isSaving: boolean;
 }
 
@@ -25,7 +25,7 @@ export const ShippingEntryForm = ({
   onDraftChange,
   onAddRow,
   onRemoveRow,
-  onRequestConfirm,
+  onSubmit,
   isSaving
 }: ShippingEntryFormProps) => {
 
@@ -52,7 +52,7 @@ export const ShippingEntryForm = ({
       alert('请填写至少一条有效的发货记录');
       return;
     }
-    onRequestConfirm(validRecords);
+    onSubmit(validRecords);
   };
 
   return (

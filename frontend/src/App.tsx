@@ -165,6 +165,7 @@ function App() {
             onRefreshOrders={salesOrdersQuery.reload}
             logs={shippingLogsQuery.data}
             logsLoading={shippingLogsQuery.loading}
+            onRefreshLogs={shippingLogsQuery.reload}
           />
         )}
         {activePanel === 'receiving' && (

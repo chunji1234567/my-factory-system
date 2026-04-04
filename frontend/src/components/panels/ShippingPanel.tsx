@@ -13,8 +13,9 @@ import { ShippingEntryForm } from './shipping/ShippingEntryForm';
 import { ShippingHistoryLog } from './shipping/ShippingHistoryLog';
 
 type ShippingFilters = { status: string; customerInput: string };
+type ShippingSubmissionRecord = { orderId: number; itemId: number; quantity: number; trackingNo?: string };
 
-export default function ShippingPanel({ orders, onRefreshOrders, loading, error, logs, logsLoading }: any) {
+export default function ShippingPanel({ orders, onRefreshOrders, loading, error, logs, logsLoading, onRefreshLogs }: any) {
   // --- 1. 状态管理 ---
   const [isSavingId, setIsSavingId] = useState<number | null>(null);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
@@ -35,7 +36,8 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
       return (
         matchStatus && (
           order.partner_name?.toLowerCase().includes(keyword) ||
-          String(order.partner).includes(currentFilters.customerInput)
+          String(order.partner).includes(currentFilters.customerInput) ||
+          order.order_no?.toLowerCase().includes(keyword)
         )
       );
     }
@@ -95,14 +97,15 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
   };
 
   // C. 提交批量发货
-  const handleBulkSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const validData = shippingDrafts.filter(d => d.orderId && d.itemId && Number(d.quantity) > 0);
-    if (validData.length === 0) return alert("请填写有效的发货记录");
+  const handleBulkSubmit = async (records: ShippingSubmissionRecord[]) => {
+    if (!records.length) {
+      alert("请填写有效的发货记录");
+      return;
+    }
 
     try {
       setIsBulkSaving(true);
-      await Promise.all(validData.map(d => 
+      await Promise.all(records.map((d) => 
         api.createShippingLog({
           sales_item: Number(d.itemId),
           quantity_shipped: Number(d.quantity),
@@ -111,6 +114,9 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
       ));
       setShippingDrafts([{ orderId: '', itemId: '', quantity: '', trackingNo: '' }]);
       await onRefreshOrders();
+      if (typeof onRefreshLogs === 'function') {
+        await onRefreshLogs();
+      }
       alert("发货记录已成功保存");
     } catch (err: any) {
       alert("批量提交失败: " + err.message);

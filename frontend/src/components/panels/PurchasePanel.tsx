@@ -1,4 +1,4 @@
-import { Fragment, useState, useMemo } from 'react';
+import { Fragment, useState, useMemo, useCallback } from 'react';
 import { api } from '../../api/client';
 import FilterBar from '../common/FilterBar';
 import {PartnerSelect} from '../common/PartnerSelect';
@@ -10,6 +10,7 @@ import Modal from '../common/Modal';
 import Pagination from '../common/Pagination';
 import { resolvePartnerId, formatPartner } from '../../utils/orderUtils';
 import NavbarButton from '../common/NavbarButton';
+import { usePaginatedFilter } from '../../hooks/usePaginatedFilter';
 
 // 1. 常量定义
 const STATUS_OPTIONS = [
@@ -18,13 +19,13 @@ const STATUS_OPTIONS = [
   { value: 'RECEIVED', label: '全部入库' },
 ];
 
+type PurchaseFilters = { status: string; supplierInput: string; supplierId: number | null };
+
 export default function PurchasePanel({ 
   orders, loading, onRefresh, products, partners, isManager, categories 
 }: any) {
   // --- 状态管理 ---
-  const [filters, setFilters] = useState({ status: '', supplierInput: '', supplierId: null as number | null });
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [page, setPage] = useState(1);
   
   const [modal, setModal] = useState<{ open: boolean; mode: 'create' | 'edit'; draftId: number | null }>({
     open: false, mode: 'create', draftId: null
@@ -41,23 +42,37 @@ export default function PurchasePanel({
     (categories || []).map((c: any) => ({ value: String(c.id), label: c.name })), 
   [categories]);
 
-  const filteredOrders = useMemo(() => {
-    return orders.filter((o: any) => {
-      const matchStatus = !filters.status || o.status === filters.status;
-      if (filters.supplierId) {
-        return matchStatus && Number(o.partner) === filters.supplierId;
-      }
-      if (filters.supplierInput) {
-        const input = filters.supplierInput.toLowerCase();
-        return matchStatus && o.partner_name?.toLowerCase().includes(input);
-      }
-      return matchStatus;
-    });
-  }, [orders, filters]);
+  const filterFn = useCallback((order: any, currentFilters: PurchaseFilters) => {
+    const matchStatus = !currentFilters.status || order.status === currentFilters.status;
+    if (!matchStatus) return false;
+    if (currentFilters.supplierId) {
+      return Number(order.partner) === currentFilters.supplierId;
+    }
+    if (currentFilters.supplierInput) {
+      const keyword = currentFilters.supplierInput.toLowerCase();
+      return (
+        order.partner_name?.toLowerCase().includes(keyword) ||
+        String(order.partner).includes(currentFilters.supplierInput) ||
+        order.order_no?.toLowerCase().includes(keyword)
+      );
+    }
+    return true;
+  }, []);
 
-  const pagedOrders = useMemo(() => 
-    filteredOrders.slice((page - 1) * 30, page * 30), 
-  [filteredOrders, page]);
+  const {
+    filters,
+    setFilters,
+    resetFilters,
+    page,
+    setPage,
+    pagedData: pagedOrders,
+    total: filteredTotal,
+  } = usePaginatedFilter<any, PurchaseFilters>({
+    data: orders,
+    pageSize: 30,
+    initialFilters: { status: '', supplierInput: '', supplierId: null },
+    filterFn,
+  });
 
   const [eventModal, setEventModal] = useState({ open: false, orderId: null as number | null, content: '' });
 
@@ -141,18 +156,18 @@ export default function PurchasePanel({
 
       {/* B. 筛选区 */}
       <FilterBar actions={
-        <NavbarButton variant="outline" className="text-xs" onClick={() => setFilters({ status: '', supplierInput: '', supplierId: null })}>
+        <NavbarButton variant="outline" className="text-xs" onClick={resetFilters}>
           重置筛选
         </NavbarButton>
       }>
         <FilterBar.Field label="供应商名称 / #ID">
           <PartnerSelect 
             id="purchase-filter" partners={supplierOptions} value={filters.supplierInput}
-            onChange={(val, id) => setFilters({ ...filters, supplierInput: val, supplierId: id })}
+            onChange={(val, id) => setFilters(prev => ({ ...prev, supplierInput: val, supplierId: id }))}
           />
         </FilterBar.Field>
         <FilterBar.Field label="订单状态">
-          <select className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm bg-white outline-none focus:border-slate-900" value={filters.status} onChange={e => setFilters({ ...filters, status: e.target.value })}>
+          <select className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm bg白 outline-none focus:border-slate-900" value={filters.status} onChange={e => setFilters(prev => ({ ...prev, status: e.target.value }))}>
             <option value="">全部显示</option>
             {STATUS_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
           </select>
@@ -303,7 +318,7 @@ export default function PurchasePanel({
         </div>
       </Modal>
 
-      <Pagination page={page} total={filteredOrders.length} onPageChange={setPage} />
+        <Pagination page={page} total={filteredTotal} onPageChange={setPage} />
     </div>
   );
 }
