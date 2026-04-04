@@ -1,55 +1,53 @@
-import type { ReactNode } from 'react';
-
-interface Props {
+interface PaginationProps {
   page: number;
-  pageSize: number;
   total: number;
-  onPageChange(page: number): void;
-  pageSizeText?: ReactNode;
+  pageSize?: number;
+  onPageChange: (page: number) => void;
 }
 
-export default function Pagination({ page, pageSize, total, onPageChange, pageSizeText }: Props) {
-  if (total <= pageSize) {
-    return null;
+export default function Pagination({ 
+  page = 1, 
+  total = 0, 
+  pageSize = 30, 
+  onPageChange 
+}: PaginationProps) {
+  
+  // 使用 Math.max 确保至少为 1，防止出现 0 或 NaN
+  const safeTotal = typeof total === 'number' ? total : 0;
+  const totalPages = Math.max(1, Math.ceil(safeTotal / pageSize));
+  
+  // 如果只有一页，可以选择隐藏分页或禁用按钮
+  if (totalPages <= 1) {
+    return (
+      <div className="flex justify-center p-4">
+        <span className="text-xs text-slate-400 font-mono italic">END OF LIST</span>
+      </div>
+    );
   }
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const from = (page - 1) * pageSize + 1;
-  const to = Math.min(page * pageSize, total);
-
-  const goTo = (next: number) => {
-    const target = Math.min(Math.max(next, 1), totalPages);
-    if (target !== page) {
-      onPageChange(target);
-    }
-  };
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
-      <span>
-        显示 {from}-{to} / {total}
-        {pageSizeText && <span className="ml-2 text-xs text-slate-500">{pageSizeText}</span>}
-      </span>
+    <div className="flex items-center justify-between px-6 py-4 bg-white rounded-3xl border border-slate-100 shadow-sm">
+      <button
+        disabled={page <= 1}
+        onClick={() => onPageChange(page - 1)}
+        className="p-2 disabled:opacity-30 hover:bg-slate-50 rounded-full transition-colors"
+      >
+        ← 上一页
+      </button>
+      
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="rounded-full border border-slate-200 px-3 py-1 disabled:opacity-40"
-          onClick={() => goTo(page - 1)}
-          disabled={page <= 1}
-        >
-          上一页
-        </button>
-        <span>
-          第 {page} / {totalPages} 页
-        </span>
-        <button
-          type="button"
-          className="rounded-full border border-slate-200 px-3 py-1 disabled:opacity-40"
-          onClick={() => goTo(page + 1)}
-          disabled={page >= totalPages}
-        >
-          下一页
-        </button>
+        <span className="text-sm font-bold text-slate-900">{page}</span>
+        <span className="text-sm text-slate-400">/</span>
+        <span className="text-sm text-slate-400">{totalPages}</span>
       </div>
+
+      <button
+        disabled={page >= totalPages}
+        onClick={() => onPageChange(page + 1)}
+        className="p-2 disabled:opacity-30 hover:bg-slate-50 rounded-full transition-colors"
+      >
+        下一页 →
+      </button>
     </div>
   );
 }

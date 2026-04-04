@@ -15,6 +15,7 @@ import { useCategories } from './hooks/useCategories';
 import { useSalesOrders } from './hooks/useSalesOrders';
 import { usePurchaseOrders } from './hooks/usePurchaseOrders';
 import { usePartners } from './hooks/usePartners';
+import { useShippingLogs } from './hooks/useShippingLogs';
 import { panelConfig, type PanelKey, type InventoryProduct } from './types';
 
 const panelKeysList = Object.keys(panelConfig) as PanelKey[];
@@ -50,6 +51,7 @@ function App() {
   const partnersNeeded = isManager || isWarehouse || isShipper;
   const partnersQuery = usePartners(Boolean(accessToken && partnersNeeded));
   const purchaseOrdersQuery = usePurchaseOrders(Boolean(accessToken));
+  const shippingLogsQuery = useShippingLogs(Boolean(accessToken && (isManager || isShipper)));
 
   const allowedPanels = useMemo(() => {
     if (!user) {
@@ -158,9 +160,11 @@ function App() {
         {activePanel === 'shipping' && (
           <ShippingPanel
             orders={salesOrdersQuery.data}
-            ordersLoading={salesOrdersQuery.loading}
-            ordersError={salesOrdersQuery.error}
+            loading={salesOrdersQuery.loading}
+            error={salesOrdersQuery.error}
             onRefreshOrders={salesOrdersQuery.reload}
+            logs={shippingLogsQuery.data}
+            logsLoading={shippingLogsQuery.loading}
           />
         )}
         {activePanel === 'receiving' && (
