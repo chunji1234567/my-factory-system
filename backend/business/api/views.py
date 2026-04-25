@@ -362,10 +362,17 @@ def _format_order_items(order):
     items = getattr(order, 'items', None)
     if items is None:
         return ''
-    for item in items.all():
-        name = item.custom_product_name or getattr(item.product, 'name', '') or '未命名'
-        quantity = item.quantity or 0   
-        price = item.price or Decimal('0')
+    iterable = items.all() if hasattr(items, 'all') else items
+    for item in iterable:
+        name = getattr(item, 'custom_product_name', None)
+        if not name:
+            product = getattr(item, 'product', None)
+            if product:
+                name = getattr(product, 'model_name', None) or getattr(product, 'name', None)
+        if not name:
+            name = '未命名'
+        quantity = getattr(item, 'quantity', 0) or 0
+        price = getattr(item, 'price', Decimal('0')) or Decimal('0')
         details.append(f"{name}: {quantity} x ¥{price:.2f}")
     return '; '.join(details)
 
@@ -534,7 +541,7 @@ class FinancePartnerDetailView(APIView):
             return Response({'detail': 'Invalid finance type'}, status=400)
         partner = get_object_or_404(Partner, pk=partner_id, partner_type__in=partner_types)
 
-        orders = order_model.objects.filter(partner=partner)
+        orders = order_model.objects.filter(partner=partner).prefetch_related('items__product')
         order_status = request.query_params.get('order_status')
         if order_status:
             orders = orders.filter(status=order_status)
@@ -554,7 +561,7 @@ class FinancePartnerDetailView(APIView):
         if order_ordering not in ORDER_ORDERING_FIELDS:
             order_ordering = '-created_at'
         orders = orders.order_by(order_ordering)
-        orders_serialized = serializer_class(orders, many=True).data
+        orders_serialized = serializer_class(orders, many=True, context={'request': request}).data
 
         transactions = FinancialTransaction.objects.filter(partner=partner)
         txn_from = self._parse_date_param(request.query_params.get('transaction_from'))

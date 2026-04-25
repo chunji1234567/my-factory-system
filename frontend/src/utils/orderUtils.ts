@@ -8,9 +8,14 @@ export const formatPartner = (name?: string, id?: number) => {
 export const resolvePartnerId = (value: string, partners: PartnerResponse[]) => {
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const match = trimmed.match(/^#?(\d+)$/);
-  if (match) {
-    const id = Number(match[1]);
+  const directMatch = trimmed.match(/^#?(\d+)$/);
+  if (directMatch) {
+    const id = Number(directMatch[1]);
+    return partners.find(p => p.id === id) ? id : null;
+  }
+  const embeddedMatch = trimmed.match(/#(\d+)/);
+  if (embeddedMatch) {
+    const id = Number(embeddedMatch[1]);
     return partners.find(p => p.id === id) ? id : null;
   }
   const normalized = trimmed.toLowerCase();

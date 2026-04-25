@@ -114,7 +114,7 @@ export const OrderItemsEditor = ({
               {mode === 'sales' && (
                 <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4 border-t border-slate-50 pt-4">
                   <div className="lg:col-span-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">客户产品名</span>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">客户产品名称</span>
                     <input 
                       list="preferred-models"
                       className="w-full mt-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"

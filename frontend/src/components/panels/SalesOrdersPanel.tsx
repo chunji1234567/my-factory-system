@@ -11,10 +11,11 @@ import Pagination from '../common/Pagination';
 import { resolvePartnerId, formatPartner } from '../../utils/orderUtils';
 import NavbarButton from '../common/NavbarButton';
 import { usePaginatedFilter } from '../../hooks/usePaginatedFilter';
+import { useCustomerPreferredProducts } from '../../hooks/useCustomerPreferredProducts';
 
 // 1. 常量定义 - 销售状态
 const SALES_STATUS_OPTIONS = [
-  { value: 'PENDING', label: '待处理' },
+  { value: 'ORDERED', label: '待处理' },
   { value: 'PRODUCING', label: '生产中' },
   { value: 'SHIPPED', label: '已发货' },
   { value: 'COMPLETED', label: '已完成' },
@@ -31,7 +32,7 @@ export default function SalesOrdersPanel({
   const [modal, setModal] = useState<{ open: boolean; mode: 'create' | 'edit'; draftId: number | null }>({
     open: false, mode: 'create', draftId: null
   });
-  const [form, setForm] = useState({ customerField: '', status: 'PENDING', items: [] as OrderItemDraft[] });
+  const [form, setForm] = useState({ customerField: '', customerId: null as number | null, status: 'ORDERED', items: [] as OrderItemDraft[] });
   const [isSaving, setIsSaving] = useState(false);
   const [eventModal, setEventModal] = useState({ open: false, orderId: null as number | null, content: '' });
 
@@ -76,6 +77,8 @@ export default function SalesOrdersPanel({
     filterFn,
   });
 
+  const preferredProducts = useCustomerPreferredProducts(form.customerId, Boolean(form.customerId));
+
   // --- 业务逻辑 ---
   const handleAddEvent = (orderId: number) => {
     setEventModal({ open: true, orderId, content: '' });
@@ -99,13 +102,14 @@ export default function SalesOrdersPanel({
   };
 
   const openCreate = () => {
-    setForm({ customerField: '', status: 'PENDING', items: [{ id: null, category: '', product: '', price: '', quantity: '', customName: '', detailDescription: '' }] });
+    setForm({ customerField: '', customerId: null, status: 'ORDERED', items: [{ id: null, category: '', product: '', price: '', quantity: '', customName: '', detailDescription: '' }] });
     setModal({ open: true, mode: 'create', draftId: null });
   };
 
   const openEdit = (order: any) => {
     setForm({
       customerField: formatPartner(order.partner_name, order.partner),
+      customerId: Number(order.partner) || null,
       status: order.status,
       items: order.items.map((i: any) => ({
         id: i.id, 
@@ -121,7 +125,7 @@ export default function SalesOrdersPanel({
   };
 
   const handleSubmit = async () => {
-    const cId = resolvePartnerId(form.customerField, customerOptions);
+    const cId = form.customerId ?? resolvePartnerId(form.customerField, customerOptions);
     if (!cId) return alert("请选择有效的客户");
 
     const validItems = form.items.filter(item => (item.product || item.customName) && Number(item.quantity) > 0);
@@ -139,6 +143,24 @@ export default function SalesOrdersPanel({
       };
       if (modal.mode === 'create') await api.createSalesOrder(payload);
       else await api.updateSalesOrder(modal.draftId!, payload);
+      if (form.customerId) {
+        const existingNames = new Set(
+          (preferredProducts.data || []).map((p) => p.name.trim().toLowerCase()),
+        );
+        const newNames = Array.from(
+          new Set(
+            validItems
+              .map((i) => i.customName?.trim())
+              .filter((name): name is string => Boolean(name) && !existingNames.has(name.toLowerCase())),
+          ),
+        );
+        if (newNames.length) {
+          await Promise.all(
+            newNames.map((name) => api.createCustomerPreferredProduct({ partner: form.customerId!, name })),
+          );
+          preferredProducts.reload();
+        }
+      }
       setModal({ ...modal, open: false });
       onRefresh();
     } catch (e: any) { alert(e.message); } finally { setIsSaving(false); }
@@ -259,8 +281,15 @@ export default function SalesOrdersPanel({
         footer={<NavbarButton disabled={isSaving} onClick={handleSubmit} className="px-10">{isSaving ? '提交中...' : '确认发布销售单'}</NavbarButton>}
       >
         <div className="space-y-8 py-2">
-          <PartnerSelect label="选择下单客户" id="modal-customer" partners={customerOptions} value={form.customerField} onChange={(val) => setForm({ ...form, customerField: val })} />
-          <OrderItemsEditor mode="sales" items={form.items} products={products} categoryOptions={categoryOptions} onChange={(newItems) => setForm({ ...form, items: newItems })} />
+          <PartnerSelect label="选择下单客户" id="modal-customer" partners={customerOptions} value={form.customerField} onChange={(val, id) => setForm({ ...form, customerField: val, customerId: id ?? null })} />
+          <OrderItemsEditor
+            mode="sales"
+            items={form.items}
+            products={products}
+            categoryOptions={categoryOptions}
+            preferredModelOptions={(preferredProducts.data || []).map((p) => p.name)}
+            onChange={(newItems) => setForm({ ...form, items: newItems })}
+          />
         </div>
       </Modal>
 

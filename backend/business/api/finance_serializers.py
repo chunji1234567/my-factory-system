@@ -3,6 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from business.models import SalesOrder, PurchaseOrder, FinancialTransaction
+from .serializers import SalesOrderItemSerializer, PurchaseOrderItemSerializer
 
 
 class FinancePartnerSummarySerializer(serializers.Serializer):
@@ -16,10 +17,13 @@ class FinancePartnerSummarySerializer(serializers.Serializer):
 
 class FinanceOrderSerializer(serializers.ModelSerializer):
     outstanding_amount = serializers.SerializerMethodField()
+    items = SalesOrderItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = SalesOrder
-        fields = ['id', 'order_no', 'status', 'total_amount', 'paid_amount', 'created_at', 'outstanding_amount']
+        fields = [
+            'id', 'order_no', 'status', 'total_amount', 'paid_amount', 'created_at', 'outstanding_amount', 'items'
+        ]
 
     def get_outstanding_amount(self, obj):
         return obj.total_amount - obj.paid_amount
@@ -27,10 +31,13 @@ class FinanceOrderSerializer(serializers.ModelSerializer):
 
 class FinancePurchaseOrderSerializer(serializers.ModelSerializer):
     outstanding_amount = serializers.SerializerMethodField()
+    items = PurchaseOrderItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = PurchaseOrder
-        fields = ['id', 'order_no', 'status', 'total_amount', 'paid_amount', 'created_at', 'outstanding_amount']
+        fields = [
+            'id', 'order_no', 'status', 'total_amount', 'paid_amount', 'created_at', 'outstanding_amount', 'items'
+        ]
 
     def get_outstanding_amount(self, obj):
         return obj.total_amount - obj.paid_amount

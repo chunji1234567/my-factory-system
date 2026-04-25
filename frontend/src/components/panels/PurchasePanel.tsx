@@ -30,7 +30,7 @@ export default function PurchasePanel({
   const [modal, setModal] = useState<{ open: boolean; mode: 'create' | 'edit'; draftId: number | null }>({
     open: false, mode: 'create', draftId: null
   });
-  const [form, setForm] = useState({ supplierField: '', status: 'ORDERED', items: [] as OrderItemDraft[] });
+  const [form, setForm] = useState({ supplierField: '', supplierId: null as number | null, status: 'ORDERED', items: [] as OrderItemDraft[] });
   const [isSaving, setIsSaving] = useState(false);
 
   // --- 数据处理 (useMemo) ---
@@ -100,13 +100,14 @@ export default function PurchasePanel({
   };
 
   const openCreate = () => {
-    setForm({ supplierField: '', status: 'ORDERED', items: [{ id: null, category: '', product: '', price: '', quantity: '' }] });
+    setForm({ supplierField: '', supplierId: null, status: 'ORDERED', items: [{ id: null, category: '', product: '', price: '', quantity: '' }] });
     setModal({ open: true, mode: 'create', draftId: null });
   };
 
   const openEdit = (order: any) => {
     setForm({
       supplierField: formatPartner(order.partner_name, order.partner),
+      supplierId: Number(order.partner) || null,
       status: order.status,
       items: order.items.map((i: any) => ({
         id: i.id, category: String(i.product_detail?.category_detail?.id || ''),
@@ -117,7 +118,7 @@ export default function PurchasePanel({
   };
 
   const handleSubmit = async () => {
-    const sId = resolvePartnerId(form.supplierField, supplierOptions);
+    const sId = form.supplierId ?? resolvePartnerId(form.supplierField, supplierOptions);
     if (!sId) return alert("请选择有效的供应商");
 
     const validItems = form.items.filter(item => item.product && Number(item.quantity) > 0);
@@ -268,7 +269,7 @@ export default function PurchasePanel({
         footer={<NavbarButton disabled={isSaving} onClick={handleSubmit} className="px-10">{isSaving ? '提交中...' : '确认发布'}</NavbarButton>}
       >
         <div className="space-y-8 py-2">
-          <PartnerSelect label="供应商渠道" id="modal-supplier" partners={supplierOptions} value={form.supplierField} onChange={(val) => setForm({ ...form, supplierField: val })} />
+          <PartnerSelect label="供应商渠道" id="modal-supplier" partners={supplierOptions} value={form.supplierField} onChange={(val, id) => setForm({ ...form, supplierField: val, supplierId: id ?? null })} />
           <OrderItemsEditor mode="purchase" items={form.items} products={products} categoryOptions={categoryOptions} onChange={(newItems) => setForm({ ...form, items: newItems })} />
         </div>
       </Modal>

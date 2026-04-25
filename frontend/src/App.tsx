@@ -138,6 +138,7 @@ function App() {
             orders={salesOrdersQuery.data}
             partners={partnersQuery.data}
             products={productsQuery.data}
+            categories={categoriesQuery.data}
             loading={salesOrdersQuery.loading}
             error={salesOrdersQuery.error}
             onRefresh={salesOrdersQuery.reload}
@@ -153,6 +154,7 @@ function App() {
             onRefresh={purchaseOrdersQuery.reload}
             products={productsQuery.data}
             partners={partnersQuery.data}
+            categories={categoriesQuery.data}
             isManager={isManager}
             canCreateEvents={isManager || isWarehouse}
           />

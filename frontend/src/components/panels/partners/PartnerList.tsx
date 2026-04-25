@@ -1,6 +1,5 @@
 // src/components/panels/partners/PartnerList.tsx
 import React from 'react';
-import NavbarButton from '../../common/NavbarButton';
 
 export const PartnerList = ({ partners, typeFilter, onTypeChange, onSelect }: any) => {
   const labels = { CUSTOMER: '客户', SUPPLIER: '供应商', BOTH: '全能' };

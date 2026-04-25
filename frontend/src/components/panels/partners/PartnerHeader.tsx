@@ -1,13 +1,26 @@
 // src/components/panels/partners/PartnerHeader.tsx
 import React from 'react';
-import NavbarButton from '../common/NavbarButton';
+import NavbarButton from '../../common/NavbarButton';
 
-export const PartnerHeader = ({ name, setName, type, setType, onSubmit, submitting, typeFilter, onTypeFilter }: any) => {
+interface Props {
+  name: string;
+  setName: (value: string) => void;
+  type: string;
+  setType: (value: string) => void;
+  onSubmit: () => void;
+  submitting: boolean;
+  typeFilter: string;
+  onTypeFilter: (value: string) => void;
+  keyword: string;
+  onKeywordChange: (value: string) => void;
+}
+
+export const PartnerHeader = ({ name, setName, type, setType, onSubmit, submitting, typeFilter, onTypeFilter, keyword, onKeywordChange }: Props) => {
   return (
     <div className="space-y-4">
       {/* 快速创建行 */}
       <section className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm flex flex-wrap items-end gap-4">
-        <div className="flex-1 min-w-[200px]">
+        <div className="w-full sm:w-52">
           <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">新增合作方名称</label>
           <input 
             className="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm outline-none focus:border-slate-900"
@@ -34,7 +47,7 @@ export const PartnerHeader = ({ name, setName, type, setType, onSubmit, submitti
       </section>
 
       {/* 列表类型快速切换 */}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2 items-center">
         {['ALL', 'CUSTOMER', 'SUPPLIER', 'BOTH'].map(t => (
           <button
             key={t}
@@ -46,6 +59,14 @@ export const PartnerHeader = ({ name, setName, type, setType, onSubmit, submitti
             {t === 'ALL' ? '全部' : t === 'CUSTOMER' ? '客户' : t === 'SUPPLIER' ? '供应商' : '全能'}
           </button>
         ))}
+        <div className="flex-1 min-w-[200px]">
+          <input
+            className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm outline-none focus:border-slate-900"
+            placeholder="按名称或 #ID 搜索"
+            value={keyword}
+            onChange={(e) => onKeywordChange(e.target.value)}
+          />
+        </div>
       </div>
     </div>
   );
