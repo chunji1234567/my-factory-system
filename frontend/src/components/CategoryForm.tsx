@@ -1,9 +1,14 @@
 import { useState } from 'react';
 import { api } from '../api/client';
 
+// 分类类型选项——必须与后端 core.Category.TYPE_CHOICES 保持一致。
+// 注意：BOARD（板材）自 BOM-2.0（2026-05-21）起弃用——板材不再作为半成品
+// 独立分类，改用 PCB 方案展开到原材料层，所以这里也不暴露。
+// 详见 docs/PRD.md §3.1 与 §9.4 changelog 2026-05-21（PCB 方案改造）。
 const options = [
   { value: 'RAW_MATERIAL', label: '原材料' },
-  { value: 'SELF_MADE', label: '自产件' },
+  { value: 'SELF_MADE', label: '自产件（外壳）' },
+  { value: 'CABLE', label: '线材' },
   { value: 'FINISHED', label: '成品' },
 ];
 

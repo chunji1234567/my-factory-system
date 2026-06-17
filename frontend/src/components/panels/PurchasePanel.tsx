@@ -34,8 +34,11 @@ export default function PurchasePanel({
   const [isSaving, setIsSaving] = useState(false);
 
   // --- 数据处理 (useMemo) ---
-  const supplierOptions = useMemo(() => 
-    partners.filter((p: any) => p.partner_type !== 'CUSTOMER'), 
+  // 供应商范围：SUPPLIER 与 BOTH（双重身份），与后端 PurchaseOrder.partner 的
+  // limit_choices_to 同口径。原写法用 != 'CUSTOMER' 会把 SELF（工厂自用）
+  // 也纳入下拉，提交时被后端拒绝。
+  const supplierOptions = useMemo(() =>
+    partners.filter((p: any) => p.partner_type === 'SUPPLIER' || p.partner_type === 'BOTH'),
   [partners]);
   
   const categoryOptions = useMemo(() => 

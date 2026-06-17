@@ -1,4 +1,16 @@
-"""Seed richer demo data for partners, products, purchases, sales, and finance."""
+"""Seed richer demo data for partners, products, purchases, sales, and finance.
+
+注意事项（2026-05-11 审计）：
+- 本脚本与重设计后的 schema **兼容**：不引用已删除的 ``Partner.balance`` /
+  ``paid_amount``，PartnerLedgerEntry 由 signal 自动生成不需要手动构造。
+- ``ReceivingLog.received_at`` / ``ShippingLog.shipped_at`` 显式传值是
+  无效写法（``auto_now_add=True`` 会忽略），保留不修是为了减少改动范围。
+- `FINANCE_TRANSACTIONS` 用 ``FinancialTransaction.objects.create`` **绕过**
+  序列化器，意味着 ``_normalize_amount`` 不会跑——脚本里的 amount 是什么符号
+  就是什么符号。**spec 中部分条目符号可能与生产语义不一致**（例如
+  "海外客户B PAYMENT -18000" —— 客户回款语义上应该是 RECEIPT），
+  审计已记入 docs/PRD.md §9.2。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

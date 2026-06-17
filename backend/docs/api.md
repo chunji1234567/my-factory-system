@@ -1,53 +1,151 @@
-# Backend API Overview
+# Backend API 速查（2026-05-21 修订）
 
-## Authentication
-- Obtain JWT: `POST /api/token/` with `{ "username": "...", "password": "..." }`.
-- Refresh: `POST /api/token/refresh/` with `{ "refresh": "<token>" }`.
-- Send `Authorization: Bearer <access token>` on every request.
-- Roles map to Django groups (`manager`, `warehouse`, `shipper`). Demo setup via `python manage.py shell -c "from scripts import setup_roles; setup_roles.main()"`.
+> 本文是供 API 调用方（前端 / 第三方集成）快速查询的精简版。**完整规格、字段定义、不变量、状态机**请看 `docs/PRD.md`。本文与 PRD §5 同步，发生冲突以 PRD 为准。
 
-## Core Products
-- `GET /api/core/products/`: list inventory items with category details.
-- `GET /api/core/products/{id}/` (extendable): fetch single item.
+## 0. 健康检查
 
-## Purchase Workflow
-- `GET /api/business/purchase-orders/` / `/{id}/`: manager + warehouse read access. Managers see `total_amount` & line `price`; warehouse users receive `null` for那些字段。 支持分页参数（`?page=`、`?page_size=`）、排序（`?ordering=created_at` 或 `-total_amount`），以及 `?status=ORDERED|PARTIAL|RECEIVED`、`?partner=<id>`、`?order_no=模糊串`、`?created_from=YYYY-MM-DD`、`?created_to=YYYY-MM-DD`。
-- `POST /api/business/purchase-orders/`: manager only. Payload example:
-  ```json
-  {
-    "order_no": "PO-001",
-    "partner": 3,
-    "items_payload": [
-      {"product": 5, "price": "15.50", "quantity": "100"}
-    ]
-  }
-  ```
-- `GET /api/business/receiving-logs/`: manager/warehouse list receiving history. Filters: `?purchase_order=<id>`（或 `purchase_item__order`）、`?operator=keyword`（模糊匹配）、`?received_from=YYYY-MM-DD`、`?received_to=YYYY-MM-DD`，可按 `received_at`、`quantity_received` 排序。
-- `POST /api/business/receiving-logs/`: manager/warehouse create receiving batches. Fields: `purchase_item`, `quantity_received`, `remark`. Inventory & status update automatically.
+```
+GET /health/   →   200  {"status": "ok"}
+```
 
-## Sales Workflow
-- `GET /api/business/sales-orders/` / `/{id}/`: manager + shipper read access. Only managers see amount fields. Items include `shipped_quantity` progress，支持分页、排序（`?ordering=-created_at` 等）以及 `?status=...`、`?partner=<id>`、`?order_no=模糊串`、`?created_from=YYYY-MM-DD`、`?created_to=YYYY-MM-DD`。
-- `POST /api/business/sales-orders/`: manager creates orders with `items_payload` similar to purchase API.
-- `GET /api/business/shipping-logs/`: manager/shipper list shipments. Filters: `?sales_order=<id>`（或 `sales_item__order`）、`?operator=keyword`、`?shipped_from=YYYY-MM-DD`、`?shipped_to=YYYY-MM-DD`，可指定 `?ordering=shipped_at` 或 `-quantity_shipped`。
-- `POST /api/business/shipping-logs/`: manager/shipper create shipments (`sales_item`, `quantity_shipped`, optional `tracking_no`). Automatically logs order events.
+- 顶层路径（**不**在 `/api/` 下），供反代/编排层探活
+- **无需鉴权**（`AllowAny` + `authentication_classes=[]`），带 token 也不报错
+- 不做 DB 探活——DB 探活走 `python manage.py check --database default`（见 `rules/deployment-rules.md §6`）
 
-- `GET /api/business/stock-adjustments/`: manager & warehouse view adjustments. Filters: `?product=<id>`, `?adjustment_type=MANUAL_IN|MANUAL_OUT|PRODUCE_IN`, `?created_from=YYYY-MM-DD`, `?created_to=YYYY-MM-DD`, `?note=keyword`，支持分页/排序。
-- `POST /api/business/stock-adjustments/`: same roles create manual/production adjustments.
-  ```json
-  {
-    "product": 7,
-    "adjustment_type": "MANUAL_IN",
-    "quantity": "25",
-    "note": "盘盈"
-  }
-  ```
-- Valid `adjustment_type`: `MANUAL_IN`, `MANUAL_OUT`, `PRODUCE_IN`.
+## 1. 鉴权
 
-## Finance (Receivable / Payable)
-- `GET /api/business/finance/partners/`: Manager-only summary。`?type=receivable|payable`（默认 receivable），并支持 `?search=`、`?created_from=YYYY-MM-DD`、`?created_to=YYYY-MM-DD`、`?ordering=-outstanding` 等参数，返回应收/应付总额及分页后的合作伙伴列表（含未结金额、订单数量、最近下单时间）。
-- `GET /api/business/finance/partners/{partner_id}/`: Manager-only detail。`?type=receivable|payable` 决定展示销售单或采购单；可用 `?order_status=`、`?order_from=`、`?order_to=`、`?order_ordering=` 过滤订单，亦可用 `?transaction_from=`、`?transaction_to=`、`?transaction_ordering=` 筛选财务流水。响应包含合作伙伴余额、未结金额、所有相关订单（附未结金额字段）和全部转账记录。
-- `GET/POST /api/business/finance/transactions/`: Manager-only财务流水接口。GET 支持 `?partner=<id>`、`?created_from=YYYY-MM-DD`、`?created_to=YYYY-MM-DD`、`?ordering=-created_at`，POST 时提供 `partner`, `amount`, `note` 即可记录收付款，系统自动回写操作人。
+JWT（djangorestframework-simplejwt），access token 寿命 8 小时。
 
-## Future GET Endpoints & Filters
-- Shipping/Receiving logs currently expose create-only endpoints; add list views with query params (e.g., `?purchase_order=1`) when the UI needs searchable history.
-- Filters mean allowing URL query params like `?status=PARTIAL` or `?partner=5` to narrow list responses. Implement via `django-filter` or manual filtering in views.
+```
+POST /api/token/           {"username": "...", "password": "..."} → {"access": "...", "refresh": "..."}
+POST /api/token/refresh/   {"refresh": "..."}                      → {"access": "..."}
+```
+
+所有业务端点请求头：`Authorization: Bearer <access>`。
+
+**前端实现细节**：`api/client.ts` 中 `apiFetch` 检测到 401 时会自动调 `/api/token/refresh/` 并重试一次原请求，对调用方透明。
+
+## 2. 角色
+
+Django Groups：`manager` / `warehouse` / `shipper`。`superuser` 视同 manager。完整权限矩阵见 PRD §2.2。
+
+## 3. 主数据接口（`/api/core/`）
+
+| 路径 | 方法 | 权限 | 备注 |
+|---|---|---|---|
+| `products/` | GET | manager / warehouse | DRF 分页，返回 `category_detail` 嵌套 |
+| `products/` | POST | manager / warehouse | 创建产品 |
+| `categories/` | GET / POST | manager / warehouse | 同上口径 |
+| `partners/` | GET / POST | **manager only** | 创建合作方；非 manager 不要调（403） |
+| `pcb-plans/` | LIST / CREATE / RETRIEVE / UPDATE / DESTROY | **manager only** | PCB 方案 CRUD。nested `materials` 写入；UPDATE 时**全量替换 materials**。过滤：`is_active` / `name` / `code`（icontains）。详见 PRD §3.2 §4.5 |
+| `me/` | GET | 任意已认证 | 返回 `{id, username, full_name, roles[]}` |
+
+## 4. 业务接口（`/api/business/`）
+
+### 4.1 销售订单
+
+| 路径 | 方法 | 权限 |
+|---|---|---|
+| `sales-orders/` | GET | manager / shipper |
+| `sales-orders/` | POST / PATCH / DELETE | manager only |
+| `sales-orders/{id}/events/` | GET / POST | manager / shipper |
+| `sales-orders/{id}/status/` | PATCH | manager / shipper（仅前进一档） |
+
+**查询参数**：`status`、`partner`、`order_no`（icontains）、`partner_name`（icontains）、`created_from`、`created_to`、`ordering`、`page`、`page_size`
+
+**关键约束**：
+- 编辑明细数量时 `quantity < shipped_quantity` 抛 ValidationError
+- 状态机：`ORDERED` → `PRODUCING` → `SHIPPED` → `COMPLETED`，PATCH `/status/` **仅前进一档**
+- `order_no` 未传时后端自动生成 `SO{year}-{NNNN}`（`select_for_update + 取最大尾号 +1`）
+
+### 4.2 采购订单
+
+| 路径 | 方法 | 权限 |
+|---|---|---|
+| `purchase-orders/` | GET | manager / warehouse（金额对 warehouse null） |
+| `purchase-orders/` | POST / PATCH / DELETE | manager only |
+| `purchase-orders/{id}/events/` | GET / POST | manager / warehouse |
+
+**查询参数**：`status`、`partner`、`order_no`、`created_from`、`created_to`、`ordering`、`page`、`page_size`
+
+**关键约束**：编辑明细时 `quantity < 已收量` 抛 ValidationError；`order_no` 与 SO 同口径自动生成。
+
+### 4.3 收发货 / 库存调整（事件型，append-only）
+
+| 路径 | 方法 | 权限 | 备注 |
+|---|---|---|---|
+| `receiving-logs/` | GET / POST | manager / warehouse | 入库；写入即调库存 |
+| `shipping-logs/` | GET / POST | manager / shipper | 发货；**不动库存** |
+| `stock-adjustments/` | GET / POST | manager / warehouse | 库存调整（MANUAL_IN/MANUAL_OUT/PRODUCE_IN） |
+
+**重要**：上述三个端点 **没有 PATCH/PUT/DELETE**——这些是 append-only 事件，错了请录反向类型冲销（详见 PRD §3.2 + `rules/backend-rules.md §1.5`）。
+
+**收货**`receiving-logs/` 查询参数：`purchase_order`、`operator`、`received_from`、`received_to`、`ordering`、`page`、`page_size`
+
+**发货**`shipping-logs/` 查询参数：`sales_order`、`partner`、`partner_name`、`operator`、`shipped_from`、`shipped_to`、`ordering`、`page`、`page_size`
+
+**库存调整**`stock-adjustments/` 查询参数：`product`、`adjustment_type`（`MANUAL_IN` / `MANUAL_OUT` / `PRODUCE_IN` / `PRODUCE_CONSUME`）、`operator`、`note`、`created_from`、`created_to`、`ordering`、`page`、`page_size`。`PRODUCE_CONSUME` 由排产单 EXECUTED 自动写入，前端 / admin 不要手动写。
+
+### 4.4 BOM 排产（每日扣料）
+
+| 路径 | 方法 | 权限 | 备注 |
+|---|---|---|---|
+| `production-orders/` | GET / POST | manager / warehouse / shipper | 列表 / 新建（带 `lines_payload` 嵌套写） |
+| `production-orders/{id}/` | GET / PATCH | 同上 | PATCH 仅 `PLANNED` 有效；其他状态 400 拒绝。**无 DELETE** |
+| `production-orders/{id}/execute/` | POST | 同上 | 触发扣料：状态 PLANNED → EXECUTED，signal 自动写 3N 条 `StockAdjustment(PRODUCE_CONSUME)` |
+| `production-orders/{id}/cancel/` | POST | 同上 | 仅 PLANNED → CANCELLED |
+
+**查询参数**：`status`（`PLANNED` / `EXECUTED` / `CANCELLED`）、`plan_date`、`plan_date_from`、`plan_date_to`、`order_no`、`ordering`、`page`、`page_size`
+
+**关键约束**：
+- 排产单 EXECUTED 不可逆——admin 整单只读、ViewSet 不挂 DestroyMixin、再 save 由 pre_save 钩子识别状态未变化跳过扣料。要"退料"必须由 warehouse 录入反向 `StockAdjustment(MANUAL_IN)`
+- 允许库存变负（半成品由其他车间补货）
+- 一条 line 必须挂三件半成品（外壳 / 板材 / 线材）；若挂 `sales_item`，三件 FK 自动从 sales_item 同名字段回填
+- `order_no` 不传时后端自动生成 `PRD{year}-{NNNN}`
+
+### 4.5 客户偏好型号
+
+| 路径 | 方法 | 权限 |
+|---|---|---|
+| `customer-preferred-products/` | GET | manager / shipper |
+| `customer-preferred-products/` | POST / DELETE | manager only |
+
+查询参数：`?partner=<id>` 必传；`search`（按 name 模糊）。
+
+### 4.5 财务（manager only，全部）
+
+| 路径 | 方法 | 备注 |
+|---|---|---|
+| `finance/transactions/` | GET / POST / PATCH / DELETE | 流水 CRUD |
+| `finance/partners/` | GET | 合作方汇总（应收/应付分页） |
+| `finance/partners/{id}/` | GET | 单合作方详情 |
+| `finance/partners/{id}/ledger-export/` | GET | CSV 台账导出（带 BOM） |
+
+**流水**`finance/transactions/` 查询参数：`partner`、`transaction_type`、`note`、`created_from`、`created_to`、`ordering`、`page`、`page_size`
+
+**类型与符号规则**（关键）：
+- POST 时 `RECEIPT` / `PAYMENT` 传 `amount=正数`，后端 `_normalize_amount` 自动取 `-abs(amount)`
+- `ADJUST` 类型保留原符号
+- 显示时根据 `transaction_type` 决定是否取 `abs`（前端 `FinanceDetailPanel` 已实现）
+
+**合作方汇总 / 详情**支持 `type=receivable|payable`、`search`、日期范围、ordering。详情接口还支持 `ledger_page` / `ledger_page_size` / `ledger_from` / `ledger_to`。
+
+**台账导出**：`Content-Type: text/csv; charset=utf-8-sig`，附 BOM，Excel 直开。支持 `summary=1` 简化模式 + `year` 年度筛选。
+
+## 5. 响应格式约定
+
+- **DRF 分页**（所有 list 端点）：`{count: int, next: url|null, previous: url|null, results: [...]}`，PAGE_SIZE 默认 20
+- **`finance/partners/`** 例外：`results` 是个 dict 而非数组 —— `{type, total_balance, partners: [...]}`，前端解构时多一层（2026-05-21 起 `total_outstanding` 改为 `total_balance`；详见 PRD §9.4 changelog）
+- **错误响应**：单字段 `{detail: "..."}` 或多字段 `{field: ["..."]}`；状态非法时 `{detail: "非法的状态转换"}` 400
+- **金额字段对非 manager 是 `null`**（`MonetaryMaskMixin`）—— 前端必须把 `null` 渲染为 `-` 或隐藏，**禁止当作 0 格式化**
+
+## 6. 与本文配套的资源
+
+- 完整 PRD：`docs/PRD.md`
+- 后端代码约束：`rules/backend-rules.md`
+- 前端列表 hook 标准范式（如何正确消费上述分页接口）：`rules/frontend-rules.md §3.1`
+- 风险与待办：`docs/PRD.md §9`
+
+## 7. 历史快照
+
+`backend/docs/api.md` 早期版本（2026-04 前）描述了 `paid_amount` / `Partner.balance` 等已废弃字段，已被本文整体替换。详见 PRD §9.4 changelog。

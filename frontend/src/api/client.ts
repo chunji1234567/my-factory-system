@@ -21,6 +21,15 @@ function resolveApiBaseUrl() {
 
 const API_BASE_URL = resolveApiBaseUrl();
 let authToken: string | null = null;
+let refreshToken: string | null = null;
+
+// 用于把"续期成功后的新 access token"广播给 AuthContext 持久化。
+// AuthContext 用 onAuthTokenRefreshed(cb) 注册一次性回调。
+type TokenRefreshedCallback = (accessToken: string) => void;
+let onTokenRefreshed: TokenRefreshedCallback | null = null;
+
+// 单次飞行的 refresh promise，防止 N 个并发 401 请求触发 N 次 refresh。
+let refreshInFlight: Promise<string> | null = null;
 
 export function setAuthToken(token: string) {
   authToken = token;
@@ -28,10 +37,176 @@ export function setAuthToken(token: string) {
 
 export function clearAuthToken() {
   authToken = null;
+  refreshToken = null;
+}
+
+/** 由 AuthContext 调用，把 refresh token 同步给 client.ts。
+ *  client.ts 内部在 401 时会用它去续期 access token。
+ */
+export function setRefreshToken(token: string | null) {
+  refreshToken = token;
+}
+
+/** AuthContext 注册一个回调，client.ts 在自动续期成功后调一次，
+ *  让 AuthContext 把新 access token 持久化到 localStorage / state。
+ *  传 null 解注册。
+ */
+export function onAuthTokenRefreshed(cb: TokenRefreshedCallback | null) {
+  onTokenRefreshed = cb;
 }
 
 interface ApiOptions extends RequestInit {
   skipAuth?: boolean;
+  /** 内部用——续期重试时设为 true，避免循环重试。
+   *  外部调用者不需要传。 */
+  _isRetryAfterRefresh?: boolean;
+}
+
+/** 列表接口的标准查询参数——所有 list hook 共用此基础结构。 */
+export interface ListQueryParams {
+  page?: number;
+  page_size?: number;
+  ordering?: string;
+}
+
+/** 销售订单列表查询参数，与后端 SalesOrderFilter（business/api/filters.py）对齐。 */
+export interface SalesOrdersQueryParams extends ListQueryParams {
+  status?: string;
+  partner?: number;
+  order_no?: string;
+  partner_name?: string;
+  created_from?: string; // YYYY-MM-DD
+  created_to?: string;   // YYYY-MM-DD
+}
+
+/** 采购订单列表查询参数，与后端 PurchaseOrderFilter 对齐。 */
+export interface PurchaseOrdersQueryParams extends ListQueryParams {
+  status?: string;
+  partner?: number;
+  order_no?: string;
+  created_from?: string;
+  created_to?: string;
+}
+
+/** 发货日志列表查询参数，与后端 ShippingLogFilter 对齐。 */
+export interface ShippingLogsQueryParams extends ListQueryParams {
+  sales_order?: number;
+  partner?: number;
+  partner_name?: string;
+  operator?: string;
+  shipped_from?: string;
+  shipped_to?: string;
+}
+
+/** 财务流水列表查询参数，与后端 FinancialTransactionFilter 对齐。 */
+export interface FinanceTransactionsQueryParams extends ListQueryParams {
+  partner?: number;
+  transaction_type?: 'RECEIPT' | 'PAYMENT' | 'ADJUST';
+  note?: string;
+  created_from?: string;
+  created_to?: string;
+}
+
+/** 产品 / 分类 / 合作方列表的查询参数（后端目前没有专用 FilterSet，
+ *  仅靠 DRF 默认分页 + ordering）。 */
+export interface ProductsQueryParams extends ListQueryParams {}
+export interface CategoriesQueryParams extends ListQueryParams {}
+export interface PartnersQueryParams extends ListQueryParams {}
+
+/** PCB 方案列表查询参数（与后端 PcbPlanFilter 对齐）。 */
+export interface PcbPlansQueryParams extends ListQueryParams {
+  is_active?: boolean;
+  name?: string;
+  code?: string;
+}
+
+/** 排产单列表查询参数，与后端 ProductionOrderFilter 对齐（详见 docs/PRD.md §4）。 */
+export interface ProductionOrdersQueryParams extends ListQueryParams {
+  status?: 'PLANNED' | 'EXECUTED' | 'CANCELLED';
+  plan_date?: string;            // YYYY-MM-DD
+  plan_date_from?: string;
+  plan_date_to?: string;
+  order_no?: string;
+}
+
+/** 把 query params 对象序列化成带 `?` 前缀的 query string；空对象返回空串。
+ *  null / undefined / 空串的字段会被丢弃，避免发出 ?status=&page= 这种空参。
+ */
+export function toQueryString(params: object | undefined | null): string {
+  if (!params) return '';
+  const usp = new URLSearchParams();
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    if (value === undefined || value === null || value === '') continue;
+    usp.set(key, String(value));
+  }
+  const s = usp.toString();
+  return s ? `?${s}` : '';
+}
+
+/** DRF PageNumberPagination 的标准响应结构。 */
+export interface PaginatedResponse<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+/**
+ * 销售单明细写入 payload（创建 + 编辑共用）。
+ *
+ * BOM-2.0 改造（2026-05-21）后，三件 = 外壳半成品 + PCB 方案 + 线材半成品
+ * 必须齐备（后端 serializer 强制校验）。`product` 字段语义 = 外壳槽位（沿用
+ * 历史字段名），与 `pcb_plan` / `cable` 并列。
+ *
+ * 历史：`board` 字段在 BOM-2.0 中删除，由 `pcb_plan: FK PcbPlan` 取代——
+ * 排产时按方案展开扣减原材料，详见 docs/PRD.md §4.5 §9.4 changelog。
+ *
+ * `custom_product_name` / `detail_description` 允许 undefined——前端
+ * 表单可能不填，后端默认空字符串。
+ */
+export interface SalesOrderItemPayload {
+  id?: number;
+  product: number;                          // 外壳（SELF_MADE）
+  pcb_plan: number;                         // PCB 方案（替代旧 board 字段）
+  cable: number;                            // 线材（CABLE）
+  price: number;
+  quantity: number;
+  custom_product_name?: string;
+  detail_description?: string;
+}
+
+/** 用 refresh token 换新 access token。
+ *  并发去重：多个 401 同时落地时只发一次 refresh，所有请求共享结果。
+ *  refresh 失败时清空两个 token 并向上抛——调用方（apiFetch）会让原始请求自然 401。
+ */
+async function refreshAccessToken(): Promise<string> {
+  if (!refreshToken) {
+    throw new Error('No refresh token available');
+  }
+  if (refreshInFlight) {
+    return refreshInFlight;
+  }
+  refreshInFlight = (async () => {
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/token/refresh/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh: refreshToken }),
+      });
+      if (!resp.ok) {
+        // refresh token 本身过期或无效 → 不可恢复，清空所有 token。
+        clearAuthToken();
+        throw new Error(`Refresh failed: ${resp.status}`);
+      }
+      const data = (await resp.json()) as { access: string };
+      authToken = data.access;
+      onTokenRefreshed?.(data.access);
+      return data.access;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
 }
 
 export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
@@ -52,6 +227,23 @@ export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promi
     ...options,
     headers,
   });
+
+  // 401 自动续期 + 重试一次。
+  // 条件：本次不是已经续过的重试、不是 skipAuth、且有 refresh token 可用。
+  if (
+    response.status === 401 &&
+    !options._isRetryAfterRefresh &&
+    !options.skipAuth &&
+    refreshToken
+  ) {
+    try {
+      await refreshAccessToken();
+      // 用新 token 重试原请求（_isRetryAfterRefresh=true 防再次进入此分支）。
+      return apiFetch<T>(path, { ...options, _isRetryAfterRefresh: true });
+    } catch {
+      // refresh 失败：让原 401 自然落到下面的错误处理。
+    }
+  }
 
   if (!response.ok) {
     let message: string;
@@ -94,17 +286,65 @@ export const api = {
       skipAuth: true,
     });
   },
-  getProducts() {
-    return apiFetch(`/api/core/products/`);
+  getProducts(params: ProductsQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/core/products/${qs}`);
   },
   getCurrentUser() {
-    return apiFetch(`/api/core/me/`);
+    return apiFetch<{ id: number; username: string; full_name?: string; roles?: string[] }>(`/api/core/me/`);
   },
-  getPartners() {
-    return apiFetch(`/api/core/partners/`);
+  getPartners(params: PartnersQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/core/partners/${qs}`);
   },
-  getCategories() {
-    return apiFetch(`/api/core/categories/`);
+  getCategories(params: CategoriesQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/core/categories/${qs}`);
+  },
+
+  // ===== PCB 方案（BOM-2.0） =====
+  // 业务上方案 = 一种 PCB 板的物料配方，被销售明细 / 排产明细引用。
+  // 仅 manager 可写 / 读（PRD §2.2）；warehouse / shipper 通过销售或排产
+  // 明细返回的 pcb_plan_detail 嵌套间接消费。详见 PRD §3.2 / §4.5。
+  getPcbPlans(params: PcbPlansQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/core/pcb-plans/${qs}`);
+  },
+  getPcbPlan(id: number) {
+    return apiFetch(`/api/core/pcb-plans/${id}/`);
+  },
+  createPcbPlan(payload: {
+    name: string;
+    code?: string;
+    description?: string;
+    is_active?: boolean;
+    materials?: Array<{ material: number; quantity_per_unit: number | string; note?: string }>;
+  }) {
+    return apiFetch(`/api/core/pcb-plans/`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+  updatePcbPlan(
+    id: number,
+    payload: Partial<{
+      name: string;
+      code: string;
+      description: string;
+      is_active: boolean;
+      // 传 materials 列表时**全量替换**（删旧建新）；不传则不动 materials
+      materials: Array<{ material: number; quantity_per_unit: number | string; note?: string }>;
+    }>,
+  ) {
+    return apiFetch(`/api/core/pcb-plans/${id}/`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+  deletePcbPlan(id: number) {
+    return apiFetch(`/api/core/pcb-plans/${id}/`, {
+      method: 'DELETE',
+    });
   },
   createCategory(payload: { name: string; category_type: string; parent?: number | null }) {
     return apiFetch(`/api/core/categories/`, {
@@ -136,20 +376,16 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  getSalesOrders(params = '') {
-    return apiFetch(`/api/business/sales-orders/${params}`);
+  getSalesOrders(params: SalesOrdersQueryParams | string = '') {
+    // 兼容旧调用：若传字符串就直接拼到 URL 末尾（保留少量地方仍可用裸 query string）；
+    // 新调用方应传 SalesOrdersQueryParams 对象，由 toQueryString 序列化。
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/business/sales-orders/${qs}`);
   },
   createSalesOrder(payload: {
     partner: number;
     operator?: string;
-    items_payload: Array<{
-      id?: number;
-      product: number | null;
-      custom_product_name: string;
-      detail_description?: string;
-      price: number;
-      quantity: number;
-    }>;
+    items_payload: SalesOrderItemPayload[];
   }) {
     return apiFetch(`/api/business/sales-orders/`, {
       method: 'POST',
@@ -160,16 +396,13 @@ export const api = {
     id: number,
     payload: Partial<{
       partner: number;
+      // 注意：通用 PATCH **不**走状态机校验——状态推进必须用
+      // updateSalesOrderStatus；这里保留字段类型仅作历史兼容，
+      // 业务代码请走 /sales-orders/{id}/status/。详见
+      // rules/frontend-rules.md §2.2。
       status: string;
       operator?: string;
-      items_payload: Array<{
-        id?: number;
-        product: number | null;
-        custom_product_name: string;
-        detail_description?: string;
-        price: number;
-        quantity: number;
-      }>;
+      items_payload: SalesOrderItemPayload[];
     }>,
   ) {
     return apiFetch(`/api/business/sales-orders/${id}/`, {
@@ -206,11 +439,14 @@ export const api = {
       body: JSON.stringify({ status }),
     });
   },
-  getPurchaseOrders(params = '') {
-    return apiFetch(`/api/business/purchase-orders/${params}`);
+  getPurchaseOrders(params: PurchaseOrdersQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/business/purchase-orders/${qs}`);
   },
   createPurchaseOrder(payload: {
-    order_no: string;
+    // order_no 可选——后端 PurchaseOrderSerializer._generate_order_no 会自动生成
+    // PO{year}-{NNNN} 格式（详见 docs/PRD.md §3.2）；前端不传是正常用法。
+    order_no?: string;
     partner: number;
     operator?: string;
     items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>;
@@ -249,11 +485,78 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+  // --- 排产（BOM 自动扣料） ---
+  // 详见 docs/PRD.md §4 排产流程。三角色（manager/warehouse/shipper）均可使用。
+  getProductionOrders(params: ProductionOrdersQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/business/production-orders/${qs}`);
+  },
+  createProductionOrder(payload: {
+    // order_no 可选，后端自动生成 PRD{year}-{NNNN}
+    order_no?: string;
+    plan_date: string;          // YYYY-MM-DD
+    operator?: string;
+    note?: string;
+    lines_payload: Array<{
+      id?: number;
+      sales_item?: number | null;
+      // 备货场景必须传三件（外壳 + PCB 方案 + 线材，BOM-2.0）；
+      // 关联销售明细时可让后端从 sales_item 自动回填
+      shell?: number;
+      pcb_plan?: number;
+      cable?: number;
+      quantity: number;
+      note?: string;
+    }>;
+  }) {
+    return apiFetch(`/api/business/production-orders/`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+  updateProductionOrder(
+    id: number,
+    payload: Partial<{
+      plan_date: string;
+      operator: string;
+      note: string;
+      lines_payload: Array<{
+        id?: number;
+        sales_item?: number | null;
+        shell?: number;
+        pcb_plan?: number;
+        cable?: number;
+        quantity: number;
+        note?: string;
+      }>;
+    }>,
+  ) {
+    // 仅在 PLANNED 状态下后端允许编辑；EXECUTED/CANCELLED 会返回 400。
+    return apiFetch(`/api/business/production-orders/${id}/`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+  executeProductionOrder(id: number) {
+    // POST 触发扣料：状态 PLANNED → EXECUTED，自动写 3N 条 PRODUCE_CONSUME 调整。
+    // 不可逆，前端需要在提交前给用户显眼提示。
+    return apiFetch(`/api/business/production-orders/${id}/execute/`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+  cancelProductionOrder(id: number) {
+    return apiFetch(`/api/business/production-orders/${id}/cancel/`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
   getFinanceSummary(type: 'receivable' | 'payable' = 'receivable') {
     return apiFetch(`/api/business/finance/partners/?type=${type}`);
   },
-  getShippingLogs(params = '') {
-    return apiFetch(`/api/business/shipping-logs/${params}`);
+  getShippingLogs(params: ShippingLogsQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/business/shipping-logs/${qs}`);
   },
   createShippingLog(payload: { sales_item: number; quantity_shipped: number; tracking_no?: string }) {
     return apiFetch(`/api/business/shipping-logs/`, {
@@ -339,8 +642,9 @@ export const api = {
     }
     return response.blob();
   },
-  getFinanceTransactions(params = '') {
-    return apiFetch(`/api/business/finance/transactions/${params}`);
+  getFinanceTransactions(params: FinanceTransactionsQueryParams | string = '') {
+    const qs = typeof params === 'string' ? params : toQueryString(params);
+    return apiFetch(`/api/business/finance/transactions/${qs}`);
   },
   createFinanceTransaction(payload: {
     partner: number;

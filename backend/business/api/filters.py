@@ -7,6 +7,7 @@ from business.models import (
     ShippingLog,
     StockAdjustment,
     FinancialTransaction,
+    ProductionOrder,
 )
 
 
@@ -73,3 +74,13 @@ class FinancialTransactionFilter(django_filters.FilterSet):
     class Meta:
         model = FinancialTransaction
         fields = ['partner', 'transaction_type']
+
+
+class ProductionOrderFilter(django_filters.FilterSet):
+    plan_date_from = django_filters.DateFilter(field_name='plan_date', lookup_expr='gte')
+    plan_date_to = django_filters.DateFilter(field_name='plan_date', lookup_expr='lte')
+    order_no = django_filters.CharFilter(field_name='order_no', lookup_expr='icontains')
+
+    class Meta:
+        model = ProductionOrder
+        fields = ['status', 'plan_date', 'order_no']

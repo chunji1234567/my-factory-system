@@ -15,14 +15,15 @@ class SalesOrder(models.Model):
     )
     order_no = models.CharField("销售单号", max_length=50, unique=True)
     partner = models.ForeignKey(
-        'core.Partner', 
-        on_delete=models.CASCADE, 
+        'core.Partner',
+        on_delete=models.CASCADE,
         verbose_name="客户",
         limit_choices_to=Q(partner_type='CUSTOMER') | Q(partner_type='BOTH')
     )
     status = models.CharField("状态", choices=STATUS_CHOICES, default='ORDERED', max_length=20)
     total_amount = models.DecimalField("总金额", max_digits=15, decimal_places=2, default=0)
-    paid_amount = models.DecimalField("已付金额", max_digits=15, decimal_places=2, default=0)
+    # 注意：旧字段 paid_amount 已废弃。应收金额改为通过 PartnerLedgerEntry / Partner.balance
+    # 计算（合作方层级，不再追到单一订单）。详见 docs/PRD.md §4.4。
     created_at = models.DateTimeField("创建时间", auto_now_add=True)
     operator = models.CharField("录单员", max_length=50)
 
@@ -34,10 +35,57 @@ class SalesOrder(models.Model):
         return self.order_no
 
 class SalesOrderItem(models.Model):
+    """销售订单明细。
+
+    BOM-2.0 改造后（2026-05-21，详见 docs/PRD.md §3.2 与 §4.5 排产流程）：
+    一条明细 = 客户买的"一套成品"，由三件组成：
+      - ``product``（外壳，沿用历史字段名）—— 半成品，自家工坊产，FK→Product[SELF_MADE]
+      - ``pcb_plan`` —— **PCB 方案**（非半成品产品），FK→PcbPlan；排产时按方案
+        展开为原材料清单扣减，加工商按方案领料贴片送回
+      - ``cable``（线材）—— 半成品，自家工坊产，FK→Product[CABLE]
+
+    扣料模型（详见 ``business/signals.execute_production_consumption``）：
+      每条排产明细 → (2 + N) 条 StockAdjustment(PRODUCE_CONSUME)：
+        1 条扣 shell（quantity 个）
+        1 条扣 cable（quantity 个）
+        N 条扣 pcb_plan.materials 展开的原材料
+            （每条 = line.quantity × material.quantity_per_unit）
+
+    历史：旧 ``board`` 字段在 BOM-2.0 中删除（详见 migration 0017）。
+    历史兼容：``product`` 字段名沿用，但语义自 BOM-1.0 起特指"外壳"。
+    """
     order = models.ForeignKey(SalesOrder, related_name='items', on_delete=models.CASCADE)
     custom_product_name = models.CharField("客户侧产品名", max_length=200, help_text="给客户看的名称")
     detail_description = models.TextField("细节描述", blank=True, help_text="记录线长、定标等细节")
-    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="内部关联物料")
+    # 三件成品组合：外壳（半成品）+ PCB 方案（配方）+ 线材（半成品）
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        limit_choices_to={'category__category_type': 'SELF_MADE'},
+        verbose_name="外壳（SELF_MADE）",
+        help_text='历史字段名，BOM 改造后语义为"外壳"槽位',
+    )
+    pcb_plan = models.ForeignKey(
+        'core.PcbPlan',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        limit_choices_to={'is_active': True},
+        verbose_name="PCB 方案",
+        help_text="选择一个已启用的 PCB 方案；排产时按方案展开扣减原材料",
+    )
+    cable = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        limit_choices_to={'category__category_type': 'CABLE'},
+        verbose_name="线材",
+    )
     price = models.DecimalField("单价", max_digits=12, decimal_places=2)
     quantity = models.DecimalField("订单总量", max_digits=12, decimal_places=2)
 
@@ -81,7 +129,8 @@ class PurchaseOrder(models.Model):
     )
     status = models.CharField("状态", choices=STATUS_CHOICES, default='ORDERED', max_length=20)
     total_amount = models.DecimalField("总金额", max_digits=15, decimal_places=2, default=0)
-    paid_amount = models.DecimalField("已付金额", max_digits=15, decimal_places=2, default=0)
+    # 注意：旧字段 paid_amount 已废弃。应付金额改为通过 PartnerLedgerEntry / Partner.balance
+    # 计算（合作方层级，不再追到单一订单）。详见 docs/PRD.md §4.4。
     created_at = models.DateTimeField(auto_now_add=True)
     operator = models.CharField("操作员", max_length=50)
 
@@ -180,9 +229,12 @@ class OrderEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 class StockLog(models.Model):
+    # 业务约定：**成品不入库存**——销售明细 = 三件半成品组合（外壳/板材/线材）的
+    # BOM 配置，发货时既无成品库存可扣、也不写 SALE 类型 log。库存只跟踪半成品与
+    # 原材料，发货侧由 `ShippingLog` 记录数量但不动库存。SALE 类型在 2026-05-21
+    # 与 §9.2 #10 一同移除（详见 docs/PRD.md §9.4 changelog）。
     LOG_TYPES = (
         ('PURCHASE', '采购入库'),
-        ('SALE', '销售出库'),
         ('PRODUCE', '生产入库'),
         ('ADJUST', '手动调整'),
     )
@@ -199,6 +251,9 @@ class StockAdjustment(models.Model):
         ('MANUAL_IN', '手动入库/盘盈'),
         ('MANUAL_OUT', '手动出库/盘亏'),
         ('PRODUCE_IN', '生产入库'),
+        # PRODUCE_CONSUME：排产扣料触发的出库——由 sync_production_order_execute
+        # 信号自动写入。允许库存变负（详见 docs/PRD.md §4 排产流程）。
+        ('PRODUCE_CONSUME', '排产消耗'),
     )
     product = models.ForeignKey(Product, on_delete=models.CASCADE, verbose_name="调整物料")
     adjustment_type = models.CharField("调整类型", choices=ADJUSTMENT_TYPES, max_length=20)
@@ -212,12 +267,16 @@ class StockAdjustment(models.Model):
         verbose_name_plural = verbose_name
 
     def _delta(self):
-        if self.adjustment_type == 'MANUAL_OUT':
+        # 出库类型一律取负：手动出库 / 排产消耗
+        if self.adjustment_type in ('MANUAL_OUT', 'PRODUCE_CONSUME'):
             return -self.quantity
         return self.quantity
 
     def _log_type(self):
-        return 'PRODUCE' if self.adjustment_type == 'PRODUCE_IN' else 'ADJUST'
+        # 排产消耗在 StockLog 里也归类为 PRODUCE（与 PRODUCE_IN 配对），方便分析
+        if self.adjustment_type in ('PRODUCE_IN', 'PRODUCE_CONSUME'):
+            return 'PRODUCE'
+        return 'ADJUST'
 
     def save(self, *args, **kwargs):
         is_new = self.pk is None
@@ -265,9 +324,21 @@ class PartnerLedgerEntry(models.Model):
     amount = models.DecimalField(max_digits=15, decimal_places=2)
     debit_amount = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0'))
     credit_amount = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0'))
-    sales_order = models.ForeignKey('SalesOrder', null=True, blank=True, on_delete=models.CASCADE)
-    purchase_order = models.ForeignKey('PurchaseOrder', null=True, blank=True, on_delete=models.CASCADE)
-    transaction = models.OneToOneField(FinancialTransaction, null=True, blank=True, related_name='ledger_entry', on_delete=models.CASCADE)
+    # 三个外键统一 OneToOne 语义——"一个事实写一行"。台账采用快照模式：
+    # 订单 / 流水改动时 update_or_create 现有条目，删除时通过 CASCADE 一并删。
+    # 详见 docs/PRD.md §3.2 与 §9.4 changelog 2026-05-11。
+    sales_order = models.OneToOneField(
+        'SalesOrder', null=True, blank=True,
+        related_name='ledger_entry', on_delete=models.CASCADE,
+    )
+    purchase_order = models.OneToOneField(
+        'PurchaseOrder', null=True, blank=True,
+        related_name='ledger_entry', on_delete=models.CASCADE,
+    )
+    transaction = models.OneToOneField(
+        FinancialTransaction, null=True, blank=True,
+        related_name='ledger_entry', on_delete=models.CASCADE,
+    )
     note = models.CharField(max_length=200, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -276,3 +347,101 @@ class PartnerLedgerEntry(models.Model):
 
     def __str__(self):
         return f"{self.partner.name} {self.entry_type} {self.amount}"
+
+
+# --- 4. 排产（BOM 自动扣料） ---
+
+class ProductionOrder(models.Model):
+    """每日排产单——决定今天要做哪些销售明细（或备货）的成品组装。
+
+    状态机：``PLANNED`` → ``EXECUTED`` 或 ``CANCELLED``。
+    - ``PLANNED``：已排产但还没扣料。可以编辑 lines 也可以取消。
+    - ``EXECUTED``：已扣料。**不可逆事件**——线 / 状态 / 数量都锁死。
+       要"撤销"必须新加反向 StockAdjustment(MANUAL_IN) 把料退回（与
+       ``rules/backend-rules.md §1.5`` 的 append-only 总则一致）。
+    - ``CANCELLED``：只能从 PLANNED 转到这里。
+
+    扣料逻辑：由 ``business/signals.py`` 中的
+    ``execute_production_consumption`` 在状态切到 EXECUTED 时统一处理——
+    对每条 line 各写 3 条 ``StockAdjustment(PRODUCE_CONSUME)``（外壳 /
+    板材 / 线材）。允许库存变负（半成品由其他车间生产，本系统只记账）。
+
+    详见 docs/PRD.md §3.2 §4 §9.4 changelog 2026-05-11。
+    """
+    STATUS_CHOICES = (
+        ('PLANNED', '已排产'),
+        ('EXECUTED', '已扣料'),
+        ('CANCELLED', '已取消'),
+    )
+    order_no = models.CharField("排产单号", max_length=50, unique=True)
+    plan_date = models.DateField("排产日期")
+    status = models.CharField("状态", choices=STATUS_CHOICES, default='PLANNED', max_length=20)
+    note = models.CharField("备注", max_length=200, blank=True)
+    operator = models.CharField("操作员", max_length=50)
+    created_at = models.DateTimeField("创建时间", auto_now_add=True)
+    executed_at = models.DateTimeField("扣料时间", null=True, blank=True)
+
+    class Meta:
+        verbose_name = "排产单"
+        verbose_name_plural = verbose_name
+        ordering = ['-plan_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.order_no} ({self.get_status_display()})"
+
+
+class ProductionOrderLine(models.Model):
+    """排产明细——做多少套 (外壳 + PCB 方案 + 线材)。
+
+    BOM-2.0 改造后（2026-05-21，详见 docs/PRD.md §4.5）：
+    板材从"半成品 FK"换成"PCB 方案 FK"，排产时按方案展开为原材料清单扣减。
+
+    两种来源场景：
+    - 基于销售单：``sales_item`` 指向某个 ``SalesOrderItem``，三件来自该明细
+      的 ``product`` / ``pcb_plan`` / ``cable``。多条 line 可以指向同一销售明细
+      （分多天产）。``shell`` / ``pcb_plan`` / ``cable`` 显式记录"实际扣的方案"，
+      避免 sales_item 后续被编辑时排产历史漂移。
+    - 备货性生产：``sales_item`` 为 null，三件由 manager / warehouse 直接选。
+
+    扣料行为：每条 line 扣 (2 + N) 条 StockAdjustment(PRODUCE_CONSUME)：
+      1 条扣 shell、1 条扣 cable、N 条扣 pcb_plan.materials 展开的原材料。
+    详见 ``business/signals.execute_production_consumption``。
+    """
+    production_order = models.ForeignKey(
+        ProductionOrder, related_name='lines', on_delete=models.CASCADE,
+    )
+    sales_item = models.ForeignKey(
+        SalesOrderItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='production_lines',
+        verbose_name="关联销售明细",
+    )
+    shell = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT,
+        related_name='+',
+        limit_choices_to={'category__category_type': 'SELF_MADE'},
+        verbose_name="外壳",
+    )
+    pcb_plan = models.ForeignKey(
+        'core.PcbPlan',
+        on_delete=models.PROTECT,
+        related_name='+',
+        verbose_name="PCB 方案",
+        help_text="排产时按此方案展开为原材料清单扣减库存",
+    )
+    cable = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT,
+        related_name='+',
+        limit_choices_to={'category__category_type': 'CABLE'},
+        verbose_name="线材",
+    )
+    quantity = models.DecimalField("数量", max_digits=12, decimal_places=2)
+    note = models.CharField("备注", max_length=200, blank=True)
+
+    class Meta:
+        verbose_name = "排产明细"
+        verbose_name_plural = verbose_name

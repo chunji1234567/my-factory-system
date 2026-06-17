@@ -1,25 +1,33 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { api } from '../../api/client';
 import FilterBar from '../common/FilterBar';
 import NavbarButton from '../common/NavbarButton';
 import Pagination from '../common/Pagination';
 import Modal from '../common/Modal';
 import StatusBadge from '../common/StatusBadge';
-import { usePaginatedFilter } from '../../hooks/usePaginatedFilter';
+import { useSalesOrders, SalesOrdersFilters } from '../../hooks/useSalesOrders';
+import { useShippingLogs } from '../../hooks/useShippingLogs';
 
 // 引入重构后的三大零件
 import ShippingStatusTable from './shipping/ShippingStatusTable';
 import { ShippingEntryForm } from './shipping/ShippingEntryForm';
 import { ShippingHistoryLog } from './shipping/ShippingHistoryLog';
 
-type ShippingFilters = { status: string; customerInput: string };
+const PAGE_SIZE = 30;
+
 type ShippingSubmissionRecord = { orderId: number; itemId: number; quantity: number; trackingNo?: string };
 
-export default function ShippingPanel({ orders, onRefreshOrders, loading, error, logs, logsLoading, onRefreshLogs }: any) {
+// Panel UI 层的过滤态——customerInput 直接传给后端做 partner_name 模糊匹配。
+interface PanelFiltersState {
+  status: string;
+  customerInput: string;
+}
+
+export default function ShippingPanel() {
   // --- 1. 状态管理 ---
   const [isSavingId, setIsSavingId] = useState<number | null>(null);
   const [isBulkSaving, setIsBulkSaving] = useState(false);
-  
+
   // 详情弹窗状态
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
 
@@ -28,40 +36,60 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
     { orderId: '', itemId: '', quantity: '', trackingNo: '' }
   ]);
 
-  // --- 2. 数据处理逻辑 ---
-  const filterFn = useCallback((order: any, currentFilters: ShippingFilters) => {
-    const matchStatus = !currentFilters.status || order.status === currentFilters.status;
-    if (currentFilters.customerInput) {
-      const keyword = currentFilters.customerInput.toLowerCase();
-      return (
-        matchStatus && (
-          order.partner_name?.toLowerCase().includes(keyword) ||
-          String(order.partner).includes(currentFilters.customerInput) ||
-          order.order_no?.toLowerCase().includes(keyword)
-        )
-      );
-    }
-    return matchStatus;
-  }, []);
-
-  const {
-    filters,
-    setFilters,
-    resetFilters,
-    page,
-    setPage,
-    pagedData: pagedOrders,
-    total: filteredTotal,
-  } = usePaginatedFilter<any, ShippingFilters>({
-    data: orders || [],
-    pageSize: 30,
-    initialFilters: { status: '', customerInput: '' },
-    filterFn,
+  // --- 2. 筛选 + 分页：server-side filter 配合 useSalesOrders / useShippingLogs ---
+  const [panelFilters, setPanelFilters] = useState<PanelFiltersState>({
+    status: '',
+    customerInput: '',
   });
+  const [page, setPage] = useState(1);
 
-  const activeOrder = useMemo(() => 
-    orders?.find((o: any) => o.id === selectedOrderId), 
-  [orders, selectedOrderId]);
+  // 切换筛选条件时回到第 1 页（与 usePaginatedFilter 原有行为一致）。
+  useEffect(() => {
+    setPage(1);
+  }, [panelFilters]);
+
+  const salesFilters = useMemo<SalesOrdersFilters>(() => {
+    const next: SalesOrdersFilters = {};
+    if (panelFilters.status) next.status = panelFilters.status;
+    if (panelFilters.customerInput.trim()) {
+      next.partner_name = panelFilters.customerInput.trim();
+    }
+    return next;
+  }, [panelFilters]);
+
+  const salesOrdersQuery = useSalesOrders({
+    enabled: true,
+    page,
+    pageSize: PAGE_SIZE,
+    filters: salesFilters,
+  });
+  const pagedOrders = salesOrdersQuery.data;
+  const totalCount = salesOrdersQuery.pagination.totalCount;
+  const loading = salesOrdersQuery.loading;
+  const error = salesOrdersQuery.error;
+  const onRefreshOrders = salesOrdersQuery.reload;
+
+  const shippingLogsQuery = useShippingLogs({
+    enabled: true,
+    page: 1,
+    pageSize: PAGE_SIZE,
+    // 发货日志暂时按筛选客户名联动（如果用户输入了），其他筛选先保持简单。
+    filters: panelFilters.customerInput.trim()
+      ? { partner_name: panelFilters.customerInput.trim() }
+      : undefined,
+  });
+  const logs = shippingLogsQuery.data;
+  const logsLoading = shippingLogsQuery.loading;
+  const onRefreshLogs = shippingLogsQuery.reload;
+
+  const resetFilters = () => {
+    setPanelFilters({ status: '', customerInput: '' });
+  };
+
+  const activeOrder = useMemo(
+    () => pagedOrders.find((o) => o.id === selectedOrderId),
+    [pagedOrders, selectedOrderId],
+  );
 
   // --- 3. 业务动作 ---
 
@@ -139,11 +167,11 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
           </NavbarButton>
         }>
           <FilterBar.Field label="搜索客户名称 / 订单 ID">
-            <input 
+            <input
               className="w-full rounded-full border border-slate-200 px-6 py-4 text-base font-bold outline-none focus:border-slate-900 transition-all placeholder:text-slate-300"
               placeholder="输入关键词进行检索..."
-              value={filters.customerInput}
-              onChange={(e) => setFilters(prev => ({ ...prev, customerInput: e.target.value }))}
+              value={panelFilters.customerInput}
+              onChange={(e) => setPanelFilters(prev => ({ ...prev, customerInput: e.target.value }))}
             />
           </FilterBar.Field>
         </FilterBar>
@@ -159,24 +187,24 @@ export default function ShippingPanel({ orders, onRefreshOrders, loading, error,
           )}
           
           {/* 核心状态表 (已包含移动端自适应) */}
-          <ShippingStatusTable 
+          <ShippingStatusTable
             orders={pagedOrders}
             onUpdateStatus={handleUpdateStatus}
             onRowClick={(id) => setSelectedOrderId(id)}
             isSaving={isSavingId}
-            activeFilter={filters.status}
-            onFilterChange={(val) => setFilters(prev => ({ ...prev, status: val }))}
+            activeFilter={panelFilters.status}
+            onFilterChange={(val) => setPanelFilters(prev => ({ ...prev, status: val }))}
           />
         </div>
 
-        <Pagination page={page} total={filteredTotal} onPageChange={setPage} />
+        <Pagination page={page} total={totalCount} onPageChange={setPage} />
       </div>
 
       <hr className="border-slate-100" />
 
       {/* SECTION 2: 批量记录发货 (白色卡片风格) */}
-      <ShippingEntryForm 
-        orders={orders || []}
+      <ShippingEntryForm
+        orders={pagedOrders}
         drafts={shippingDrafts}
         onDraftChange={handleDraftChange}
         onAddRow={() => setShippingDrafts([...shippingDrafts, { orderId: '', itemId: '', quantity: '', trackingNo: shippingDrafts[0]?.trackingNo || '' }])}

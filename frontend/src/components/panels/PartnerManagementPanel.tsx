@@ -44,8 +44,11 @@ export default function PartnerManagementPanel({ partners = [], loading, error, 
   }, [filteredPartners, listPage]);
 
   // 4. 业务方法
-  const handleCreate = async (e: FormEvent) => {
-    e.preventDefault();
+  // PartnerHeader 通过 NavbarButton 的 onClick 调用，事件可能是 MouseEvent
+  // 也可能在未来作为 form onSubmit 接 FormEvent；统一接 optional SyntheticEvent
+  // 以匹配 Props.onSubmit: () => void 的零参签名（详见 partners/PartnerHeader.tsx）。
+  const handleCreate = async (e?: FormEvent) => {
+    e?.preventDefault();
     if (!name.trim()) return;
     try {
       setSubmitting(true);

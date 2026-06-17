@@ -1,5 +1,10 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, CategoriesQueryParams } from '../api/client';
+import {
+  buildListQueryParams,
+  UseListHookOptions,
+  UseListHookResult,
+  useListResource,
+} from './listHookHelpers';
 
 export interface CategoryResponse {
   id: number;
@@ -8,31 +13,25 @@ export interface CategoryResponse {
   parent?: number | null;
 }
 
-export function useCategories(enabled = true) {
-  const [data, setData] = useState<CategoryResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export type CategoriesFilters = object;
 
-  const fetchCategories = async () => {
-    try {
-      setLoading(true);
-      const response = await api.getCategories();
-      const resolved = Array.isArray((response as any).results) ? (response as any).results : response;
-      setData(resolved);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  };
+function normalizeCategory(raw: any): CategoryResponse {
+  return raw as CategoryResponse;
+}
 
-  useEffect(() => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-    fetchCategories();
-  }, [enabled]);
+type LegacyArg = boolean;
 
-  return { data, loading, error, reload: fetchCategories };
+export function useCategories(
+  optionsOrEnabled: UseListHookOptions<CategoriesFilters> | LegacyArg = {},
+): UseListHookResult<CategoryResponse> {
+  const options: UseListHookOptions<CategoriesFilters> =
+    typeof optionsOrEnabled === 'boolean'
+      ? { enabled: optionsOrEnabled }
+      : optionsOrEnabled;
+  return useListResource<CategoryResponse, CategoriesFilters>({
+    options,
+    toQueryParams: buildListQueryParams,
+    fetcher: (qp) => api.getCategories(qp as CategoriesQueryParams),
+    normalize: normalizeCategory,
+  });
 }

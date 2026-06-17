@@ -20,8 +20,13 @@ from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from core.views import HealthCheckView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # 健康检查：放顶层（不挂在 /api/ 下），方便反代统一探活；权限 AllowAny。
+    # 详见 docs/PRD.md §9.2 changelog 2026-05-21 与 rules/deployment-rules.md §6。
+    path('health/', HealthCheckView.as_view(), name='health_check'),
     path('api/core/', include('core.urls')),
     path('api/business/', include('business.api.urls')),
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

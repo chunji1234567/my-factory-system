@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import Partner, Category, Product
+from .models import Partner, Category, Product, PcbPlan, PcbPlanMaterial
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
@@ -20,3 +20,25 @@ class ProductAdmin(admin.ModelAdmin):
 
 admin.site.register(Partner)
 admin.site.register(Category)
+
+
+class PcbPlanMaterialInline(admin.TabularInline):
+    """PCB 方案明细 inline——在方案详情页直接编辑材料清单。"""
+
+    model = PcbPlanMaterial
+    extra = 1
+    autocomplete_fields = ['material']
+    fields = ('material', 'quantity_per_unit', 'note')
+
+
+@admin.register(PcbPlan)
+class PcbPlanAdmin(admin.ModelAdmin):
+    list_display = ('name', 'code', 'is_active', 'material_count', 'updated_at')
+    list_filter = ('is_active',)
+    search_fields = ('name', 'code')
+    inlines = [PcbPlanMaterialInline]
+    readonly_fields = ('created_at', 'updated_at')
+
+    def material_count(self, obj):
+        return obj.materials.count()
+    material_count.short_description = '材料种数'

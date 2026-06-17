@@ -1,5 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { api, setAuthToken, clearAuthToken } from '../api/client';
+import {
+  api,
+  setAuthToken,
+  setRefreshToken as setClientRefreshToken,
+  clearAuthToken,
+  onAuthTokenRefreshed,
+} from '../api/client';
 import type { PanelRole } from '../types';
 
 export type UserRole = PanelRole;
@@ -61,6 +67,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearAuthToken();
     }
   }, [accessToken]);
+
+  // 把 refresh token 同步给 client.ts——它在 401 时会用它自动续期。
+  useEffect(() => {
+    setClientRefreshToken(refreshToken);
+  }, [refreshToken]);
+
+  // 注册"续期成功"回调：client.ts 自动 refresh 拿到新 access token 后调一次，
+  // AuthContext 负责更新 state + localStorage，让其他组件/请求看到新 token。
+  useEffect(() => {
+    onAuthTokenRefreshed((newAccess) => {
+      setAccessToken(newAccess);
+      localStorage.setItem(ACCESS_KEY, newAccess);
+    });
+    return () => {
+      onAuthTokenRefreshed(null);
+    };
+  }, []);
 
   const loadUser = useCallback(async () => {
     if (!accessToken) {

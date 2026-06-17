@@ -3,7 +3,11 @@ import { buildPartnerSuggestions, resolvePartnerId } from '../../utils/orderUtil
 import type { PartnerResponse } from '../../hooks/usePartners';
 
 interface Props {
-  label: string;
+  // 顶部 label 文字。**可选**——FilterBar.Field 已经在外层渲染了 label，
+  // 此时 PartnerSelect 内部不再重复（避免出现两层 label）。在没有外层
+  // 容器的场景（如表单 modal）才传。2026-05-21 改 optional 以匹配
+  // SalesOrdersPanel / PurchasePanel 实际调用方式。
+  label?: string;
   value: string;
   onChange: (value: string, id: number | null) => void;
   partners: PartnerResponse[];
@@ -16,9 +20,11 @@ export const PartnerSelect = ({ label, value, onChange, partners, id, placeholde
 
   return (
     <div className="flex-1 min-w-[200px] space-y-1.5">
-      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest ml-1">
-        {label}
-      </label>
+      {label && (
+        <label className="text-xs font-bold text-slate-400 uppercase tracking-widest ml-1">
+          {label}
+        </label>
+      )}
       <input
         list={`list-${id}`}
         className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 focus:border-slate-900 transition-all"

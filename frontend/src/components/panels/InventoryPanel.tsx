@@ -27,10 +27,13 @@ export default function InventoryPanel({
   onRefreshProducts,
   onRefreshCategories,
 }: Props) {
-  // --- 逻辑部分 (保持原样，仅做微调) ---
+  // 库存中心覆盖的分类：原材料 + 线材半成品。
+  // 业务上：原材料是采购来的，线材是自家工坊产的，但两者都通过 MANUAL_IN 录入库存
+  // 并支持盘盈/盘亏，所以放同一个面板管理。详见 docs/PRD.md §3.1（CABLE 分类）。
+  const INVENTORY_TYPES = ['RAW_MATERIAL', 'CABLE'] as const;
   const rawCategories = useMemo(() => {
-    const source = categories.length ? categories : []; // 简化逻辑
-    return source.filter((cat) => cat.category_type === 'RAW_MATERIAL');
+    const source = categories.length ? categories : [];
+    return source.filter((cat) => INVENTORY_TYPES.includes(cat.category_type as any));
   }, [categories]);
 
   const [search, setSearch] = useState('');
@@ -46,10 +49,10 @@ export default function InventoryPanel({
   const filtered = useMemo(() => {
     return products.filter((item) => {
       const matchesCategory = selectedCategoryId === 'ALL'
-        ? (item.categoryType === 'RAW_MATERIAL' || item.categoryId === 0)
+        ? (INVENTORY_TYPES.includes(item.categoryType as any) || item.categoryId === 0)
         : item.categoryId === selectedCategoryId;
-      const matchesSearch = !search || 
-        item.modelName.toLowerCase().includes(search.toLowerCase()) || 
+      const matchesSearch = !search ||
+        item.modelName.toLowerCase().includes(search.toLowerCase()) ||
         item.internalCode.toLowerCase().includes(search.toLowerCase());
       return matchesCategory && matchesSearch;
     });
@@ -151,6 +154,18 @@ export default function InventoryPanel({
       {/* 2. 批量操作面板 (仅在选中时出现) */}
       {selectedProducts.length > 0 && (
         <section className="bg-amber-50 rounded-[2rem] border border-amber-100 p-6 md:p-8 shadow-xl shadow-amber-900/5 animate-in slide-in-from-top-4 duration-300">
+          {/* 不可逆提醒：StockAdjustment 是 append-only 事件，录后不可改/删，错了请录反向调整冲销。 */}
+          <div className="mb-5 rounded-2xl border-2 border-rose-200 bg-rose-50/60 px-5 py-3 flex gap-3 items-start">
+            <span className="text-rose-500 text-xl leading-none mt-0.5">⚠</span>
+            <div className="text-xs md:text-sm text-rose-900 leading-relaxed">
+              <p className="font-bold">提交后无法修改或删除</p>
+              <p className="text-rose-700/90">
+                每次出入库都是一笔历史事件，会立即改变产品库存数字。如果录错，请新加一笔
+                <span className="font-bold">反向类型</span>
+                （如把"出库 100"误录成"入库 100"，需再录一笔"出库 100"冲销）。请仔细核对数量和类型后再提交。
+              </p>
+            </div>
+          </div>
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
             <div className="space-y-2">
               <div className="flex items-center gap-2">

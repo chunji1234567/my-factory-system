@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, PurchaseOrdersQueryParams } from '../api/client';
+import {
+  buildListQueryParams,
+  UseListHookOptions,
+  UseListHookResult,
+  useListResource,
+} from './listHookHelpers';
 
 export interface PurchaseOrderItemResponse {
   id: number;
@@ -39,53 +44,52 @@ export interface PurchaseOrderResponse {
   events?: PurchaseOrderEventResponse[];
 }
 
-export function usePurchaseOrders(enabled = true) {
-  const [data, setData] = useState<PurchaseOrderResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export interface PurchaseOrdersFilters {
+  status?: string;
+  partner?: number;
+  order_no?: string;
+  created_from?: string;
+  created_to?: string;
+  ordering?: string;
+}
 
-  const fetchOrders = useCallback(async () => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-    try {
-      setLoading(true);
-      const response = await api.getPurchaseOrders();
-      const resolved = Array.isArray((response as any).results) ? (response as any).results : response;
-      const normalized: PurchaseOrderResponse[] = resolved.map((order: any) => ({
-        ...order,
-        total_amount: Number(order.total_amount ?? 0),
-        items: Array.isArray(order.items)
-          ? order.items.map((item: any) => ({
-              ...item,
-              price: Number(item.price ?? 0),
-              quantity: Number(item.quantity ?? 0),
-              received_quantity: Number(item.received_quantity ?? 0),
-            }))
-          : [],
-        events: Array.isArray(order.events)
-          ? order.events.map((event: any) => ({
-              id: event.id,
-              event_type: event.event_type,
-              content: event.content,
-              operator: event.operator ?? null,
-              created_at: event.created_at,
-            }))
-          : [],
-      }));
-      setData(normalized);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载采购订单失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [enabled]);
+function normalize(raw: any): PurchaseOrderResponse {
+  return {
+    ...raw,
+    total_amount: Number(raw.total_amount ?? 0),
+    items: Array.isArray(raw.items)
+      ? raw.items.map((item: any) => ({
+          ...item,
+          price: Number(item.price ?? 0),
+          quantity: Number(item.quantity ?? 0),
+          received_quantity: Number(item.received_quantity ?? 0),
+        }))
+      : [],
+    events: Array.isArray(raw.events)
+      ? raw.events.map((event: any) => ({
+          id: event.id,
+          event_type: event.event_type,
+          content: event.content,
+          operator: event.operator ?? null,
+          created_at: event.created_at,
+        }))
+      : [],
+  };
+}
 
-  useEffect(() => {
-    fetchOrders();
-  }, [fetchOrders]);
+type LegacyArg = boolean;
 
-  return { data, loading, error, reload: fetchOrders };
+export function usePurchaseOrders(
+  optionsOrEnabled: UseListHookOptions<PurchaseOrdersFilters> | LegacyArg = {},
+): UseListHookResult<PurchaseOrderResponse> {
+  const options: UseListHookOptions<PurchaseOrdersFilters> =
+    typeof optionsOrEnabled === 'boolean'
+      ? { enabled: optionsOrEnabled }
+      : optionsOrEnabled;
+  return useListResource<PurchaseOrderResponse, PurchaseOrdersFilters>({
+    options,
+    toQueryParams: buildListQueryParams,
+    fetcher: (qp) => api.getPurchaseOrders(qp as PurchaseOrdersQueryParams),
+    normalize,
+  });
 }

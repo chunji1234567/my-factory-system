@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, SalesOrdersQueryParams } from '../api/client';
+import {
+  buildListQueryParams,
+  UseListHookOptions,
+  UseListHookResult,
+  useListResource,
+} from './listHookHelpers';
+
+// ---------- 响应类型（与后端 SalesOrderSerializer 字段对齐） ----------
 
 export interface OrderEventResponse {
   id: number;
@@ -36,57 +43,55 @@ export interface SalesOrderResponse {
   order_no: string;
   status: string;
   total_amount: number;
-  paid_amount: number;
   created_at: string;
   items: SalesOrderItemResponse[];
   events?: OrderEventResponse[];
 }
 
-export function useSalesOrders(enabled = true) {
-  const [data, setData] = useState<SalesOrderResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export interface SalesOrdersFilters {
+  status?: string;
+  partner?: number;
+  order_no?: string;
+  partner_name?: string;
+  created_from?: string;
+  created_to?: string;
+  ordering?: string;
+}
 
-  const fetchOrders = useCallback(async () => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-    try {
-      setLoading(true);
-      const response = await api.getSalesOrders();
-      const resolved = Array.isArray((response as any).results) ? (response as any).results : response;
-      const normalized: SalesOrderResponse[] = resolved.map((order: any) => ({
-        ...order,
-        total_amount: Number(order.total_amount ?? 0),
-        paid_amount: Number(order.paid_amount ?? 0),
-        items: Array.isArray(order.items)
-          ? order.items.map((item: any) => ({
-              ...item,
-              quantity: Number(item.quantity ?? 0),
-              shipped_quantity: Number(item.shipped_quantity ?? 0),
-              price: Number(item.price ?? 0),
-            }))
-          : [],
-        events: Array.isArray(order.events)
-          ? order.events.map((event: any) => ({
-              ...event,
-              operator: event.operator ?? null,
-            }))
-          : [],
-      }));
-      setData(normalized);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [enabled]);
+function normalize(raw: any): SalesOrderResponse {
+  return {
+    ...raw,
+    total_amount: Number(raw.total_amount ?? 0),
+    items: Array.isArray(raw.items)
+      ? raw.items.map((item: any) => ({
+          ...item,
+          quantity: Number(item.quantity ?? 0),
+          shipped_quantity: Number(item.shipped_quantity ?? 0),
+          price: Number(item.price ?? 0),
+        }))
+      : [],
+    events: Array.isArray(raw.events)
+      ? raw.events.map((event: any) => ({
+          ...event,
+          operator: event.operator ?? null,
+        }))
+      : [],
+  };
+}
 
-  useEffect(() => {
-    fetchOrders();
-  }, [fetchOrders]);
+type LegacyArg = boolean;
 
-  return { data, loading, error, reload: fetchOrders };
+export function useSalesOrders(
+  optionsOrEnabled: UseListHookOptions<SalesOrdersFilters> | LegacyArg = {},
+): UseListHookResult<SalesOrderResponse> {
+  const options: UseListHookOptions<SalesOrdersFilters> =
+    typeof optionsOrEnabled === 'boolean'
+      ? { enabled: optionsOrEnabled }
+      : optionsOrEnabled;
+  return useListResource<SalesOrderResponse, SalesOrdersFilters>({
+    options,
+    toQueryParams: buildListQueryParams,
+    fetcher: (qp) => api.getSalesOrders(qp as SalesOrdersQueryParams),
+    normalize,
+  });
 }

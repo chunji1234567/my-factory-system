@@ -8,3 +8,5 @@ node_modules/    # 为以后的前端做准备
 backend/.env
 backend/media/
 frontend/.env*
+AGENT.md
+SKILLS.md

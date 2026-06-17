@@ -41,6 +41,18 @@ export const panelConfig = {
     description: '查看合作伙伴的转账记录',
     roles: ['manager'] satisfies PanelRole[],
   },
+  production: {
+    title: '排产中心',
+    description: '每日排产 + 一键扣料（外壳 / PCB 方案 / 线材）',
+    // BOM 改造：三角色都可以排产，详见 docs/PRD.md §4.5。
+    roles: ['manager', 'warehouse', 'shipper'] satisfies PanelRole[],
+  },
+  pcbPlans: {
+    title: 'PCB 方案',
+    // BOM-2.0：方案 = 一种 PCB 板的物料配方，由 manager 维护（PRD §3.2 §4.5）。
+    description: '维护 PCB 方案的物料配方（排产展开扣料）',
+    roles: ['manager'] satisfies PanelRole[],
+  },
 } as const;
 
 export type PanelKey = keyof typeof panelConfig;
@@ -64,30 +76,18 @@ export interface InventoryProduct {
   categoryId?: number;
 }
 
-export interface OrderSummary {
-  id: number;
-  partner: string;
-  orderNo: string;
-  status: string;
-  totalAmount: number;
-  paidAmount: number;
-  createdAt: string;
-}
-
+// 注意：OrderSummary / PurchaseOrderSummary 接口已删除——它们仅被死代码
+// （OrderTable.tsx / SummaryCards.tsx，已于 2026-05-11 删除）引用。
+// 现役订单类型应使用 hooks/useSalesOrders.ts 与 hooks/usePurchaseOrders.ts
+// 中的 SalesOrderResponse / PurchaseOrderResponse。
+//
+// FinanceTransactionListItem 与 ShippingLogSummary 仍保留，因为 FinanceList.tsx
+// 等死代码尚未清理；待下一轮统一删（见 docs/PRD.md §9.2）。
 export interface FinanceTransactionListItem {
   id: number;
   partner: string;
   amount: number;
   note: string;
-  createdAt: string;
-}
-
-export interface PurchaseOrderSummary {
-  id: number;
-  partner: string;
-  orderNo: string;
-  status: string;
-  totalAmount: number;
   createdAt: string;
 }
 

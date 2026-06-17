@@ -7,15 +7,15 @@ import WarehouseReceivingPanel from './components/panels/WarehouseReceivingPanel
 import FinanceDetailPanel from './components/panels/FinanceDetailPanel';
 import PartnerManagementPanel from './components/panels/PartnerManagementPanel';
 import SelfMadeGalleryPanel from './components/panels/SelfMadeGalleryPanel';
+import ProductionPanel from './components/panels/ProductionPanel';
+import PcbPlanPanel from './components/panels/PcbPlanPanel';
 import LoginForm from './components/LoginForm';
 import { useAuth } from './context/AuthContext';
 import { useProducts } from './hooks/useProducts';
 import NavbarButton from './components/common/NavbarButton';
 import { useCategories } from './hooks/useCategories';
-import { useSalesOrders } from './hooks/useSalesOrders';
 import { usePurchaseOrders } from './hooks/usePurchaseOrders';
 import { usePartners } from './hooks/usePartners';
-import { useShippingLogs } from './hooks/useShippingLogs';
 import { panelConfig, type PanelKey, type InventoryProduct } from './types';
 
 const panelKeysList = Object.keys(panelConfig) as PanelKey[];
@@ -42,16 +42,23 @@ function App() {
   const [activePanel, setActivePanel] = useState<PanelKey>(getInitialPanel);
   const panelKeys = useMemo(() => panelKeysList, []);
   const { accessToken, logout, user, userLoading } = useAuth();
-  const productsQuery = useProducts(Boolean(accessToken));
-  const categoriesQuery = useCategories(Boolean(accessToken));
-  const salesOrdersQuery = useSalesOrders(Boolean(accessToken));
+  // 角色 flag 提前计算，给下方 hook gating 使用。
   const isManager = Boolean(user?.roles?.includes('manager'));
   const isWarehouse = Boolean(user?.roles?.includes('warehouse'));
   const isShipper = Boolean(user?.roles?.includes('shipper'));
-  const partnersNeeded = isManager || isWarehouse || isShipper;
-  const partnersQuery = usePartners(Boolean(accessToken && partnersNeeded));
-  const purchaseOrdersQuery = usePurchaseOrders(Boolean(accessToken));
-  const shippingLogsQuery = useShippingLogs(Boolean(accessToken && (isManager || isShipper)));
+  // products / categories 是 manager+warehouse 的主数据（后端权限同口径）；
+  // shipper 不消费这两个接口，避免发出 403 请求。
+  const productsQuery = useProducts(Boolean(accessToken) && (isManager || isWarehouse));
+  const categoriesQuery = useCategories(Boolean(accessToken) && (isManager || isWarehouse));
+  // /api/core/partners/ 后端权限 IsManager only（详见 docs/PRD.md §2.2）。
+  // warehouse / shipper 的面板不需要 partners 列表——
+  //   - WarehouseReceivingPanel 仅作为 dead prop 接收，内部不消费；
+  //   - ShippingPanel 通过 sales_item.order.partner_name 嵌套字段拿合作方名。
+  // 因此这里只在 manager 时触发，避免 warehouse/shipper 静默 403。
+  const partnersQuery = usePartners(Boolean(accessToken) && isManager);
+  const purchaseOrdersQuery = usePurchaseOrders(Boolean(accessToken) && (isManager || isWarehouse));
+  // 注：useSalesOrders / useShippingLogs 已不在 App.tsx 中央获取——
+  // SalesOrdersPanel 与 ShippingPanel 都自管对应 hook（带 filter + pagination）。
 
   const allowedPanels = useMemo(() => {
     if (!user) {
@@ -134,14 +141,11 @@ function App() {
           />
         )}
         {activePanel === 'sales' && (
+          /* SalesOrdersPanel 自管订单数据（带 filter + 分页），不再从 App.tsx 拿 orders / loading / error / onRefresh。 */
           <SalesOrdersPanel
-            orders={salesOrdersQuery.data}
             partners={partnersQuery.data}
             products={productsQuery.data}
             categories={categoriesQuery.data}
-            loading={salesOrdersQuery.loading}
-            error={salesOrdersQuery.error}
-            onRefresh={salesOrdersQuery.reload}
             isManager={isManager}
             canCreateEvents={isManager || isShipper}
           />
@@ -160,15 +164,8 @@ function App() {
           />
         )}
         {activePanel === 'shipping' && (
-          <ShippingPanel
-            orders={salesOrdersQuery.data}
-            loading={salesOrdersQuery.loading}
-            error={salesOrdersQuery.error}
-            onRefreshOrders={salesOrdersQuery.reload}
-            logs={shippingLogsQuery.data}
-            logsLoading={shippingLogsQuery.loading}
-            onRefreshLogs={shippingLogsQuery.reload}
-          />
+          /* ShippingPanel 自管 useSalesOrders / useShippingLogs（带 filter + pagination）。 */
+          <ShippingPanel />
         )}
         {activePanel === 'receiving' && (
           <WarehouseReceivingPanel
@@ -198,6 +195,17 @@ function App() {
           />
         )}
         {activePanel === 'financeDetail' && <FinanceDetailPanel />}
+        {activePanel === 'production' && (
+          /* ProductionPanel 自管 useProductionOrders / useSalesOrders / useProducts / usePcbPlans，
+             不需要从 App.tsx 传任何数据。详见 docs/PRD.md §4.5 排产流程。 */
+          <ProductionPanel />
+        )}
+        {activePanel === 'pcbPlans' && (
+          /* PcbPlanPanel（manager only）：维护 PCB 方案配方。
+             方案被销售明细 / 排产明细引用，排产 EXECUTED 时按方案展开扣减原材料。
+             详见 docs/PRD.md §3.2 §4.5 §9.4 changelog 2026-05-21（PCB 方案改造）。 */
+          <PcbPlanPanel />
+        )}
       </main>
     </div>
   );

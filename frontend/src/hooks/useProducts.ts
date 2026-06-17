@@ -1,5 +1,10 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, ProductsQueryParams } from '../api/client';
+import {
+  buildListQueryParams,
+  UseListHookOptions,
+  UseListHookResult,
+  useListResource,
+} from './listHookHelpers';
 
 export interface ProductResponse {
   id: number;
@@ -17,32 +22,31 @@ export interface ProductResponse {
   } | null;
 }
 
-export function useProducts(enabled = true) {
-  const [data, setData] = useState<ProductResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+// Products 当前没有专用 FilterSet，filters 留作未来扩展。
+export type ProductsFilters = object;
 
-  const fetchProducts = async () => {
-    try {
-      setLoading(true);
-      const response = await api.getProducts();
-      const resolved = Array.isArray((response as any).results) ? (response as any).results : response;
-      setData(resolved);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
+function normalizeProduct(raw: any): ProductResponse {
+  return {
+    ...raw,
+    stock_quantity: Number(raw.stock_quantity ?? 0),
+    min_stock: Number(raw.min_stock ?? 0),
   };
+}
 
-  useEffect(() => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
+/** 旧签名 (enabled: boolean) 仍兼容——许多旧调用点直接传 boolean。 */
+type LegacyArg = boolean;
 
-    fetchProducts();
-  }, [enabled]);
-
-  return { data, loading, error, reload: fetchProducts };
+export function useProducts(
+  optionsOrEnabled: UseListHookOptions<ProductsFilters> | LegacyArg = {},
+): UseListHookResult<ProductResponse> {
+  const options: UseListHookOptions<ProductsFilters> =
+    typeof optionsOrEnabled === 'boolean'
+      ? { enabled: optionsOrEnabled }
+      : optionsOrEnabled;
+  return useListResource<ProductResponse, ProductsFilters>({
+    options,
+    toQueryParams: buildListQueryParams,
+    fetcher: (qp) => api.getProducts(qp as ProductsQueryParams),
+    normalize: normalizeProduct,
+  });
 }

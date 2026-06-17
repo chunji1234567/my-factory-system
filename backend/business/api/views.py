@@ -2,7 +2,8 @@ from decimal import Decimal
 import csv
 
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Sum, Count, Max, F, ExpressionWrapper, DecimalField
+from django.db.models import Sum, Count, Max, OuterRef, Subquery, DecimalField
+from django.db.models.functions import Coalesce
 from django.core.paginator import Paginator
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -24,6 +25,8 @@ from business.models import (
     FinancialTransaction,
     CustomerPreferredProduct,
     PartnerLedgerEntry,
+    ProductionOrder,
+    ProductionOrderLine,
 )
 from .serializers import (
     PurchaseOrderSerializer,
@@ -34,6 +37,7 @@ from .serializers import (
     CustomerPreferredProductSerializer,
     OrderEventSerializer,
     PurchaseOrderEventSerializer,
+    ProductionOrderSerializer,
 )
 from .permissions import (
     ManagerOrWarehouseReadOnly,
@@ -49,6 +53,7 @@ from .filters import (
     ShippingLogFilter,
     StockAdjustmentFilter,
     FinancialTransactionFilter,
+    ProductionOrderFilter,
 )
 from .finance_serializers import (
     FinancePartnerSummarySerializer,
@@ -77,8 +82,7 @@ LEDGER_ENTRY_TYPE_LABELS = {
 
 ORDER_ORDERING_FIELDS = {
     'created_at', '-created_at', 'total_amount', '-total_amount',
-    'paid_amount', '-paid_amount', 'order_no', '-order_no',
-    'status', '-status'
+    'order_no', '-order_no', 'status', '-status'
 }
 
 TRANSACTION_ORDERING_FIELDS = {'created_at', '-created_at', 'amount', '-amount'}
@@ -139,10 +143,19 @@ class SalesOrderViewSet(mixins.ListModelMixin,
     ordering = ['-created_at']
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_class = SalesOrderFilter
-    ordering_fields = ['created_at', 'total_amount', 'paid_amount']
+    ordering_fields = ['created_at', 'total_amount']
 
     def get_queryset(self):
-        return SalesOrder.objects.all().prefetch_related('items__product', 'items__shippings').select_related('partner')
+        return (
+            SalesOrder.objects
+            .all()
+            .prefetch_related(
+                'items__product', 'items__cable', 'items__shippings',
+                # BOM-2.0：pcb_plan_detail 嵌套 materials → 一次性把展开链路 prefetch
+                'items__pcb_plan__materials__material__category',
+            )
+            .select_related('partner')
+        )
 
     @action(detail=True, methods=['get', 'post'], permission_classes=[IsAuthenticated, IsManagerOrShipper], url_path='events')
     def events(self, request, pk=None):
@@ -232,8 +245,13 @@ class ShippingLogViewSet(mixins.ListModelMixin,
 
 
 class StockAdjustmentViewSet(mixins.ListModelMixin,
+                             mixins.RetrieveModelMixin,  # 让 detail GET 可用 → PATCH/PUT/DELETE 落 405
                              mixins.CreateModelMixin,
                              viewsets.GenericViewSet):
+    # 注：故意**不挂** UpdateModelMixin / DestroyModelMixin。StockAdjustment 是
+    # append-only 事件，PATCH/PUT/DELETE 必须返回 405（不能是 404，否则路由
+    # 根本不存在让人以为是 URL 错误）。详见 rules/backend-rules.md §1.5
+    # 与 docs/PRD.md §3.2 / §9.4 changelog 2026-05-11。
     serializer_class = StockAdjustmentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrWarehouse]
     ordering = ['-created_at']
@@ -243,6 +261,77 @@ class StockAdjustmentViewSet(mixins.ListModelMixin,
 
     def get_queryset(self):
         return StockAdjustment.objects.select_related('product')
+
+
+class ProductionOrderViewSet(mixins.ListModelMixin,
+                             mixins.RetrieveModelMixin,
+                             mixins.CreateModelMixin,
+                             mixins.UpdateModelMixin,
+                             viewsets.GenericViewSet):
+    """排产单 ViewSet。
+
+    权限：所有 3 个角色（manager / warehouse / shipper）均可排产，
+    与业务侧确认（2026-05-11，详见 docs/PRD.md §2.2）。
+
+    操作：
+    - GET / POST / PATCH 标准 CRUD（PATCH 仅在 PLANNED 状态下生效）
+    - ``@action execute``：把状态切到 EXECUTED 触发扣料 signal（不可逆）
+    - ``@action cancel``：从 PLANNED 取消到 CANCELLED
+    - 故意**不挂** DELETE / Destroy mixin——排产单是 append-only 的事件型
+      数据，不能删（只能 cancel 或留作历史）。
+
+    扣料逻辑在 ``business/signals.py: execute_production_consumption``，
+    一旦 EXECUTED，本 ViewSet 拒绝任何编辑。
+    """
+    serializer_class = ProductionOrderSerializer
+    permission_classes = [IsAuthenticated]  # 三角色都可操作
+    ordering = ['-plan_date', '-created_at']
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_class = ProductionOrderFilter
+    ordering_fields = ['plan_date', 'created_at', 'status']
+
+    def get_queryset(self):
+        return (
+            ProductionOrder.objects.all()
+            .prefetch_related(
+                'lines__shell', 'lines__cable',
+                'lines__pcb_plan__materials__material',
+                'lines__sales_item__order',
+            )
+        )
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def execute(self, request, pk=None):
+        """把排产单从 PLANNED 切到 EXECUTED，触发扣料。
+
+        - 仅 PLANNED 状态可执行；其他状态返回 400
+        - 不传 body，纯动作
+        - 成功后返回最新订单（带新写入的 executed_at）
+        """
+        order = self.get_object()
+        if order.status != 'PLANNED':
+            return Response(
+                {'detail': f'排产单当前状态为 {order.get_status_display()}，不允许执行扣料'},
+                status=400,
+            )
+        order.status = 'EXECUTED'
+        order.save(update_fields=['status'])
+        # execute_production_consumption signal 会自动写 StockAdjustment 并设 executed_at
+        order.refresh_from_db()
+        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def cancel(self, request, pk=None):
+        """取消排产单（仅 PLANNED 可取消）。"""
+        order = self.get_object()
+        if order.status != 'PLANNED':
+            return Response(
+                {'detail': f'排产单当前状态为 {order.get_status_display()}，不允许取消'},
+                status=400,
+            )
+        order.status = 'CANCELLED'
+        order.save(update_fields=['status'])
+        return Response(self.get_serializer(order).data)
 
 
 class FinancialTransactionViewSet(mixins.ListModelMixin,
@@ -266,6 +355,21 @@ class FinancePartnerSummaryView(APIView):
     permission_classes = [IsAuthenticated, IsManager]
 
     def get(self, request):
+        """汇总应收/应付。
+
+        重要变更（paid_amount 废弃后）：
+        - balance 直接取自 Partner.balance（= 该合作方所有
+          PartnerLedgerEntry.amount 之和），不再按订单做 (total - paid) 累加。
+        - 由于不再聚合订单金额，这里改成"按合作方分组"展示——每行 = 一个 partner。
+        - search / created_from / created_to 仍然作为"合作方筛选"：
+          * search 按合作方名称模糊匹配；
+          * created_from/created_to 限定"该合作方在所选时段内有订单"才纳入列表，
+            但 balance 仍然是合作方的当前总余额，不会被时段截断。
+
+        历史字段名：响应中的 `balance` 在 2026-05-21 之前叫 `outstanding_amount`（paid_amount
+        废弃过渡期的兼容名）；顶层聚合从 `total_outstanding` 改为 `total_balance`。
+        ordering 同时接受 `balance/-balance`（推荐）与 `outstanding/-outstanding`（向后兼容别名）。
+        """
         finance_type = request.query_params.get('type', 'receivable')
         try:
             order_model, partner_types = self._get_context(finance_type)
@@ -284,49 +388,74 @@ class FinancePartnerSummaryView(APIView):
         if created_to:
             orders = orders.filter(created_at__date__lte=created_to)
 
-        outstanding_expr = ExpressionWrapper(
-            F('total_amount') - F('paid_amount'),
-            output_field=DecimalField(max_digits=15, decimal_places=2)
+        # 按合作方聚合订单数与最近下单时间；outstanding 通过 Subquery 从
+        # PartnerLedgerEntry 求和（Partner.balance 已改为只读 property，
+        # 不再是列，详见 docs/PRD.md §3.2 与 §9.4 changelog 2026-05-11）。
+        balance_subquery = (
+            PartnerLedgerEntry.objects
+            .filter(partner_id=OuterRef('partner_id'))
+            .values('partner_id')
+            .annotate(total=Sum('amount'))
+            .values('total')
         )
-        total_outstanding = orders.aggregate(total=Sum(outstanding_expr))['total'] or Decimal('0')
-
-        summary_qs = orders.values('partner_id', 'partner__name', 'partner__partner_type').annotate(
-            outstanding=Sum(outstanding_expr),
-            total_orders=Count('id'),
-            last_order_at=Max('created_at')
+        summary_qs = (
+            orders.values(
+                'partner_id',
+                'partner__name',
+                'partner__partner_type',
+            )
+            .annotate(
+                total_orders=Count('id'),
+                last_order_at=Max('created_at'),
+                balance=Coalesce(
+                    Subquery(balance_subquery, output_field=DecimalField(max_digits=15, decimal_places=2)),
+                    Decimal('0'),
+                    output_field=DecimalField(max_digits=15, decimal_places=2),
+                ),
+            )
         )
 
-        ordering_param = request.query_params.get('ordering', '-outstanding')
+        ordering_param = request.query_params.get('ordering', '-balance')
         ordering_map = {
             'name': 'partner__name',
             '-name': '-partner__name',
             'partner__name': 'partner__name',
             '-partner__name': '-partner__name',
-            'outstanding': 'outstanding',
-            '-outstanding': '-outstanding',
+            'balance': 'balance',
+            '-balance': '-balance',
+            # 向后兼容别名：2026-05-21 前用过 outstanding/-outstanding。
+            'outstanding': 'balance',
+            '-outstanding': '-balance',
             'last_order_at': 'last_order_at',
             '-last_order_at': '-last_order_at',
         }
-        summary_qs = summary_qs.order_by(ordering_map.get(ordering_param, '-outstanding'))
+        summary_qs = summary_qs.order_by(ordering_map.get(ordering_param, '-balance'))
 
         summary_data = [
             {
                 'partner_id': row['partner_id'],
                 'partner_name': row['partner__name'],
                 'partner_type': row['partner__partner_type'],
-                'outstanding_amount': row['outstanding'] or Decimal('0'),
+                'balance': row['balance'] or Decimal('0'),
                 'total_orders': row['total_orders'],
                 'last_order_at': row['last_order_at'],
             }
             for row in summary_qs
         ]
 
+        # total_balance = 列表中所有合作方余额之和。这里在 Python 层做累加，
+        # 避免在 SQL 里再写一遍 GROUP BY 子查询；列表本身规模有限。
+        total_balance = sum(
+            (Decimal(row['balance']) for row in summary_data),
+            Decimal('0'),
+        )
+
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(summary_data, request, view=self)
         serializer = FinancePartnerSummarySerializer(page, many=True)
         payload = {
             'type': finance_type,
-            'total_outstanding': total_outstanding,
+            'total_balance': total_balance,
             'partners': serializer.data,
         }
         return paginator.get_paginated_response(payload)
@@ -552,11 +681,6 @@ class FinancePartnerDetailView(APIView):
         if order_to:
             orders = orders.filter(created_at__date__lte=order_to)
 
-        order_outstanding_expr = ExpressionWrapper(
-            F('total_amount') - F('paid_amount'),
-            output_field=DecimalField(max_digits=15, decimal_places=2)
-        )
-        outstanding_amount = orders.aggregate(total=Sum(order_outstanding_expr))['total'] or Decimal('0')
         order_ordering = request.query_params.get('order_ordering', '-created_at')
         if order_ordering not in ORDER_ORDERING_FIELDS:
             order_ordering = '-created_at'
@@ -618,12 +742,14 @@ class FinancePartnerDetailView(APIView):
 
         ledger_balance = partner.ledger_entries.aggregate(total=Sum('amount'))['total'] or Decimal('0')
 
+        # paid_amount 废弃后，"未结金额"和"台账余额"是同一个数。2026-05-21 起
+        # 前端已切换到 balance，移除历史兼容字段 outstanding_amount；详见
+        # docs/PRD.md §9.4 changelog。
         detail_data = {
             'partner_id': partner.id,
             'partner_name': partner.name,
             'partner_type': partner.partner_type,
             'balance': ledger_balance,
-            'outstanding_amount': outstanding_amount,
             'orders': orders_serialized,
             'transactions': transactions_serialized,
             'total_transactions': total_transactions,

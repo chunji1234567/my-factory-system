@@ -36,13 +36,22 @@ export default function SelfMadeGalleryPanel({
   const [adjustSaving, setAdjustSaving] = useState(false);
   const [showProductModal, setShowProductModal] = useState(false);
 
+  // 自产件图库覆盖的分类：自产外壳（SELF_MADE）+ 线材（CABLE）。
+  // 业务上两者都是自家工坊每天生产送入库的成品（详见 docs/PRD.md §4.5
+  // 物理流程说明：外壳和线材自产，PCB 板外包贴片）。
+  const SELF_MADE_TYPES = ['SELF_MADE', 'CABLE'] as const;
+
   const selfMadeProducts = useMemo(
-    () => products.filter((product) => product.category_detail?.category_type === 'SELF_MADE'),
+    () => products.filter((product) =>
+      SELF_MADE_TYPES.includes((product.category_detail?.category_type ?? '') as any),
+    ),
     [products],
   );
 
   const selfMadeCategories = useMemo(
-    () => categories.filter((category) => category.category_type === 'SELF_MADE'),
+    () => categories.filter((category) =>
+      SELF_MADE_TYPES.includes(category.category_type as any),
+    ),
     [categories],
   );
 
@@ -258,7 +267,6 @@ export default function SelfMadeGalleryPanel({
             pageSize={PAGE_SIZE}
             total={filtered.length}
             onPageChange={setPage}
-            pageSizeText={`${PAGE_SIZE} / 页`}
           />
         </div>
       </section>
@@ -276,6 +284,11 @@ export default function SelfMadeGalleryPanel({
               <p className="text-sm text-slate-500">当前调整产品</p>
               <p className="text-lg font-semibold text-slate-900">{adjustProduct.model_name}</p>
               <p className="text-xs text-slate-500">{adjustProduct.internal_code}</p>
+            </div>
+            {/* 不可逆提醒 —— append-only 事件，需要冲销时新加一笔反向调整。 */}
+            <div className="rounded-xl border border-rose-200 bg-rose-50/60 px-3 py-2 text-xs text-rose-900 leading-relaxed">
+              <span className="font-bold">⚠ 提交后无法修改/删除</span>
+              ：每次出入库都会立即改变库存数字，录错请新加一笔反向调整冲销。
             </div>
             <label className="block text-sm text-slate-600">
               <span className="mb-1 block">数量</span>

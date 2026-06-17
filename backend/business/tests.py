@@ -7,9 +7,10 @@ from rest_framework.test import APITestCase
 
 from core.models import Partner, Category, Product
 from business.models import (
-    SalesOrder, SalesOrderItem, ShippingLog, 
+    SalesOrder, SalesOrderItem, ShippingLog,
     PurchaseOrder, PurchaseOrderItem, ReceivingLog, FinancialTransaction,
-    StockAdjustment, StockLog, CustomerPreferredProduct
+    StockAdjustment, StockLog, CustomerPreferredProduct,
+    ProductionOrder, ProductionOrderLine,
 )
 
 class FactoryBusinessFlowTest(TestCase):
@@ -155,11 +156,43 @@ class BusinessAPITest(APITestCase):
             model_name="API 产品",
             stock_quantity=0
         )
+        # BOM-2.0：销售明细挂三件（外壳 + PCB 方案 + 线材）。配套数据：
+        # - CABLE 线材半成品
+        # - RAW_MATERIAL 原材料（用于方案展开）
+        # - PcbPlan 方案（含 1 条原材料明细）
+        # 详见 docs/PRD.md §3.2 §4.5 与 §9.4 changelog 2026-05-21（PCB 方案改造）。
+        from core.models import PcbPlan, PcbPlanMaterial
 
-        self.sales_order = SalesOrder.objects.create(order_no="SO-API-1", partner=self.customer, operator="Boss", total_amount=Decimal('1000'), paid_amount=Decimal('200'))
+        self.cable_category = Category.objects.create(name="API 线材分类", category_type="CABLE")
+        self.raw_category = Category.objects.create(name="API 原材料分类", category_type="RAW_MATERIAL")
+        self.cable_product = Product.objects.create(
+            category=self.cable_category,
+            internal_code="API-CABLE",
+            model_name="API 线材",
+            stock_quantity=0,
+        )
+        self.raw_chip = Product.objects.create(
+            category=self.raw_category,
+            internal_code="API-CHIP",
+            model_name="API 主控芯片",
+            stock_quantity=0,
+        )
+        self.pcb_plan = PcbPlan.objects.create(name="API 方案-A", code="API-A")
+        PcbPlanMaterial.objects.create(
+            plan=self.pcb_plan, material=self.raw_chip, quantity_per_unit=Decimal('1'),
+        )
+
+        self.sales_order = SalesOrder.objects.create(
+            order_no="SO-API-1",
+            partner=self.customer,
+            operator="Boss",
+            total_amount=Decimal('1000'),
+        )
         self.sales_item = SalesOrderItem.objects.create(
             order=self.sales_order,
             product=self.product,
+            pcb_plan=self.pcb_plan,
+            cable=self.cable_product,
             custom_product_name="API 商品",
             detail_description="描述：线长50",
             price=Decimal('20.00'),
@@ -171,7 +204,6 @@ class BusinessAPITest(APITestCase):
             partner=self.supplier,
             operator="Boss",
             total_amount=Decimal('500'),
-            paid_amount=Decimal('150')
         )
 
         FinancialTransaction.objects.create(
@@ -260,6 +292,41 @@ class BusinessAPITest(APITestCase):
         adj_rows = resp_list.data['results'] if isinstance(resp_list.data, dict) else resp_list.data
         self.assertEqual(len(adj_rows), 1)
 
+    def test_stock_adjustment_is_append_only(self):
+        """StockAdjustment 是不可逆事件——API 必须拒绝 PATCH / PUT / DELETE。
+
+        这条断言锁住"append-only"语义。如果未来有人不小心给
+        `StockAdjustmentViewSet` 加上 ``UpdateModelMixin`` / ``DestroyModelMixin``，
+        本测试会立刻挂掉，提醒 reviewer 注意——错误的"编辑库存调整"实现
+        会让 DB 数字与实际库存永久错位（编辑/删除不会回滚 Product.stock_quantity）。
+        详见 docs/PRD.md §3.2 与 §9.4 changelog 2026-05-11。
+        """
+        self._authenticate(self.warehouse)
+        # 先用合法 POST 拿到一条 adjustment
+        create_resp = self.client.post(
+            '/api/business/stock-adjustments/',
+            {
+                'product': self.product.id,
+                'adjustment_type': 'MANUAL_IN',
+                'quantity': '50',
+                'note': '盘盈用例',
+            },
+            format='json',
+        )
+        self.assertEqual(create_resp.status_code, 201)
+        adjustment_id = create_resp.data['id']
+        endpoint = f'/api/business/stock-adjustments/{adjustment_id}/'
+
+        # PATCH / PUT / DELETE 应全部 405（也不应该是 404，404 意味着路由根本不存在）
+        for method in ('patch', 'put', 'delete'):
+            with self.subTest(method=method.upper()):
+                resp = getattr(self.client, method)(endpoint, {}, format='json')
+                self.assertEqual(
+                    resp.status_code, 405,
+                    f'{method.upper()} {endpoint} 应返回 405，得到 {resp.status_code}（'
+                    'StockAdjustment 必须 append-only）',
+                )
+
     def test_shipping_log_requires_shipper_or_manager(self):
         payload = {
             "sales_item": self.sales_item.id,
@@ -296,6 +363,9 @@ class BusinessAPITest(APITestCase):
             'items_payload': [
                 {
                     'product': self.product.id,
+                    # BOM-2.0：销售明细必须挂三件（外壳 + PCB 方案 + 线材）
+                    'pcb_plan': self.pcb_plan.id,
+                    'cable': self.cable_product.id,
                     'custom_product_name': '客户型号A',
                     'detail_description': '线长120cm, 定标50',
                     'price': '18.50',
@@ -367,7 +437,8 @@ class BusinessAPITest(APITestCase):
         self.assertIn('results', resp.data)
         summary_payload = resp.data['results']
         self.assertEqual(summary_payload['type'], 'receivable')
-        self.assertGreater(Decimal(summary_payload['total_outstanding']), Decimal('0'))
+        # §9.2 #14（2026-05-21）起字段重命名 total_outstanding → total_balance
+        self.assertGreater(Decimal(summary_payload['total_balance']), Decimal('0'))
         self.assertGreater(len(summary_payload['partners']), 0)
 
         detail = self.client.get(f'/api/business/finance/partners/{self.customer.id}/?type=receivable')
@@ -389,6 +460,103 @@ class BusinessAPITest(APITestCase):
         self.assertEqual(detail.data['partner_id'], self.supplier.id)
         self.assertGreaterEqual(len(detail.data['orders']), 1)
 
+    def test_sales_order_no_uses_max_not_count(self):
+        """SO 订单号生成必须基于最大尾号 +1，而不是 count() +1。
+
+        旧的 `count() + 1` 实现在两种情况下会撞 `unique` 约束：
+        1) 并发创建——两个事务同时读到同一个 count，写入同一个 order_no
+        2) 中间删除——删一单后 count 减 1，再创建会复用已存在的尾号
+        新实现用 `select_for_update()` 锁最大尾号那一行 +1，且整段在
+        `transaction.atomic()` 内，能同时杜绝两种问题。这里通过场景 (2)
+        构造可被测试稳定捕获的回归断言。
+        """
+        self._authenticate(self.manager)
+
+        payload = {
+            'partner': self.customer.id,
+            'items_payload': [
+                {
+                    'product': self.product.id,
+                    # BOM-2.0：销售明细必须挂三件（外壳 + PCB 方案 + 线材）
+                    'pcb_plan': self.pcb_plan.id,
+                    'cable': self.cable_product.id,
+                    'custom_product_name': '回归测试品',
+                    'price': '1',
+                    'quantity': '1',
+                }
+            ],
+        }
+
+        seeded = []
+        for _ in range(3):
+            resp = self.client.post('/api/business/sales-orders/', payload, format='json')
+            self.assertEqual(resp.status_code, 201)
+            seeded.append(resp.data['order_no'])
+        # 三次创建必须给出三个不同的订单号
+        self.assertEqual(len(set(seeded)), 3)
+
+        # 删中间那一单，制造尾号空洞
+        SalesOrder.objects.filter(order_no=seeded[1]).delete()
+
+        # 再创建——新的尾号必须严格大于现存最大尾号；
+        # 若仍是旧算法 count()+1，会复用 seeded[2] 的尾号并触发 IntegrityError。
+        resp = self.client.post('/api/business/sales-orders/', payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        new_no = resp.data['order_no']
+        self.assertNotIn(new_no, seeded)
+
+        new_tail = int(new_no.split('-')[-1])
+        max_existing_tail = max(int(no.split('-')[-1]) for no in (seeded[0], seeded[2]))
+        self.assertGreater(new_tail, max_existing_tail)
+
+    def test_purchase_order_no_uses_max_not_count(self):
+        """PO 同样的回归断言——确保两边走同一份 helper 后行为一致。"""
+        self._authenticate(self.manager)
+
+        payload = {
+            'partner': self.supplier.id,
+            'items_payload': [
+                {'product': self.product.id, 'price': '1', 'quantity': '1'}
+            ],
+        }
+
+        seeded = []
+        for _ in range(3):
+            resp = self.client.post('/api/business/purchase-orders/', payload, format='json')
+            self.assertEqual(resp.status_code, 201)
+            seeded.append(resp.data['order_no'])
+        self.assertEqual(len(set(seeded)), 3)
+
+        PurchaseOrder.objects.filter(order_no=seeded[1]).delete()
+
+        resp = self.client.post('/api/business/purchase-orders/', payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        new_no = resp.data['order_no']
+        self.assertNotIn(new_no, seeded)
+        new_tail = int(new_no.split('-')[-1])
+        max_existing_tail = max(int(no.split('-')[-1]) for no in (seeded[0], seeded[2]))
+        self.assertGreater(new_tail, max_existing_tail)
+
+    def test_finance_summary_uses_partner_balance(self):
+        """汇总接口的 balance 字段应等于 Partner.balance（台账驱动），
+        而不是按订单 (total - paid) 聚合。
+
+        历史字段名 `outstanding_amount` 在 2026-05-21 改为 `balance`（详见
+        docs/PRD.md §9.4 changelog 2026-05-21 §9.2 #14）。
+        """
+        self._authenticate(self.manager)
+        self.customer.refresh_from_db()
+        expected_balance = self.customer.balance
+
+        resp = self.client.get('/api/business/finance/partners/?type=receivable')
+        self.assertEqual(resp.status_code, 200)
+        partners = resp.data['results']['partners']
+        target = next((p for p in partners if p['partner_id'] == self.customer.id), None)
+        self.assertIsNotNone(target)
+        self.assertEqual(Decimal(target['balance']), Decimal(expected_balance))
+        # 旧字段名移除后响应里**不**应再出现。
+        self.assertNotIn('outstanding_amount', target)
+
     def test_financial_transaction_api(self):
         self._authenticate(self.manager)
         payload = {
@@ -407,3 +575,326 @@ class BusinessAPITest(APITestCase):
         self._authenticate(self.warehouse)
         resp_forbidden = self.client.post('/api/business/finance/transactions/', payload, format='json')
         self.assertEqual(resp_forbidden.status_code, 403)
+
+
+class OrderDeletionLedgerTest(TestCase):
+    """删除订单后 Partner.balance 必须回到删前的值。
+
+    这条断言是为了防止未来有人想"恢复" cleanup_sales_order /
+    cleanup_purchase_order 这两个曾经被移除的 post_delete 信号——它们
+    既会创建悬空 FK 又会双重抵消余额。正确的余额维护链路是
+    `PartnerLedgerEntry` FK 上的 CASCADE 触发 `remove_ledger_from_balance`
+    信号，CASCADE 完成后余额自动归位，不需要额外的反向条目。
+    详见 docs/PRD.md §9.4 changelog 2026-05-11。
+    """
+
+    def setUp(self):
+        self.customer = Partner.objects.create(name="DEL 客户", partner_type="CUSTOMER")
+        self.supplier = Partner.objects.create(name="DEL 供应商", partner_type="SUPPLIER")
+        self.cat = Category.objects.create(name="DEL 分类", category_type="SELF_MADE")
+        self.product = Product.objects.create(
+            category=self.cat,
+            internal_code="DEL-PROD-1",
+            model_name="测试品",
+            stock_quantity=0,
+        )
+
+    def test_deleting_sales_order_resets_customer_balance(self):
+        so = SalesOrder.objects.create(order_no="SO-DEL-1", partner=self.customer, operator="Boss")
+        SalesOrderItem.objects.create(
+            order=so,
+            product=self.product,
+            custom_product_name="测试",
+            price=Decimal('100.00'),
+            quantity=Decimal('10'),
+        )
+        self.customer.refresh_from_db()
+        # 创建明细后，update_sales_order_total 信号写出 SALES 台账条目 +1000
+        self.assertEqual(self.customer.balance, Decimal('1000.00'))
+
+        so.delete()
+
+        self.customer.refresh_from_db()
+        # 删除后 CASCADE + remove_ledger_from_balance 自动归零，不再被
+        # 已删除的 cleanup_sales_order 信号双重抵消
+        self.assertEqual(self.customer.balance, Decimal('0.00'))
+
+    def test_deleting_purchase_order_resets_supplier_balance(self):
+        po = PurchaseOrder.objects.create(order_no="PO-DEL-1", partner=self.supplier, operator="Boss")
+        PurchaseOrderItem.objects.create(
+            order=po,
+            product=self.product,
+            price=Decimal('50.00'),
+            quantity=Decimal('20'),
+        )
+        self.supplier.refresh_from_db()
+        self.assertEqual(self.supplier.balance, Decimal('1000.00'))
+
+        po.delete()
+
+        self.supplier.refresh_from_db()
+        self.assertEqual(self.supplier.balance, Decimal('0.00'))
+
+
+class BOMProductionOrderTest(TestCase):
+    """BOM-2.0 排产系统核心断言。
+
+    覆盖：
+    - 排产单 EXECUTED → 写 **(2 + N)** 条 PRODUCE_CONSUME 调整：
+      1 条扣 shell（quantity 个）+ 1 条扣 cable（quantity 个）+
+      N 条扣 plan.materials 展开的原材料（line.quantity × material.qty_per_unit）
+    - 排产 append-only：EXECUTED 后再 save 不重复扣料（幂等保护）
+    - 允许库存变负
+    - PLANNED 状态不触发扣料
+    详见 docs/PRD.md §4.5 排产流程 与 §9.4 changelog 2026-05-21（PCB 方案改造）。
+    """
+
+    def setUp(self):
+        from core.models import PcbPlan, PcbPlanMaterial
+
+        # 半成品分类
+        self.cat_shell = Category.objects.create(name='外壳分类', category_type='SELF_MADE')
+        self.cat_cable = Category.objects.create(name='线材分类', category_type='CABLE')
+        # 原材料分类（用于 PCB 方案展开）
+        self.cat_raw = Category.objects.create(name='原材料分类', category_type='RAW_MATERIAL')
+
+        self.shell = Product.objects.create(
+            category=self.cat_shell, internal_code='SH-T1', model_name='外壳 T1',
+            stock_quantity=Decimal('100'),
+        )
+        self.cable = Product.objects.create(
+            category=self.cat_cable, internal_code='CB-US-150', model_name='美标 1.5m',
+            stock_quantity=Decimal('0'),  # 故意设 0 以测"允许负库存"
+        )
+        # 原材料：1 颗主控芯片（1:1）+ 5 颗电容（1:5）+ 1 块裸板（1:1）
+        self.raw_chip = Product.objects.create(
+            category=self.cat_raw, internal_code='RM-CHIP-A', model_name='主控芯片 A',
+            stock_quantity=Decimal('100'),
+        )
+        self.raw_cap = Product.objects.create(
+            category=self.cat_raw, internal_code='RM-CAP-100uF', model_name='电容 100uF',
+            stock_quantity=Decimal('500'),
+        )
+        self.raw_bare = Product.objects.create(
+            category=self.cat_raw, internal_code='RM-PCB-BARE', model_name='PCB 裸板',
+            stock_quantity=Decimal('100'),
+        )
+        # 方案：1 板 = 1 chip + 5 cap + 1 bare
+        self.plan = PcbPlan.objects.create(name='测试方案 T1', code='T1')
+        PcbPlanMaterial.objects.create(plan=self.plan, material=self.raw_chip, quantity_per_unit=Decimal('1'))
+        PcbPlanMaterial.objects.create(plan=self.plan, material=self.raw_cap, quantity_per_unit=Decimal('5'))
+        PcbPlanMaterial.objects.create(plan=self.plan, material=self.raw_bare, quantity_per_unit=Decimal('1'))
+
+    def _make_production_order_with_line(self, quantity, no_suffix=''):
+        order = ProductionOrder.objects.create(
+            order_no=f'PRD-TEST-{quantity}{no_suffix}',
+            plan_date='2026-05-21',
+            operator='manager_test',
+        )
+        ProductionOrderLine.objects.create(
+            production_order=order,
+            shell=self.shell, pcb_plan=self.plan, cable=self.cable,
+            quantity=Decimal(str(quantity)),
+        )
+        return order
+
+    def test_execute_deducts_shell_cable_and_expanded_materials(self):
+        """EXECUTED → 写 (2 + N) 条 PRODUCE_CONSUME，扣减 shell + cable + 方案展开的原材料。"""
+        order = self._make_production_order_with_line(10)
+        order.status = 'EXECUTED'
+        order.save()
+
+        # 应该生成 2 + 3 = 5 条 PRODUCE_CONSUME（shell + cable + 3 个原材料）
+        adjustments = StockAdjustment.objects.filter(
+            note__startswith=f'排产 {order.order_no}',
+            adjustment_type='PRODUCE_CONSUME',
+        )
+        self.assertEqual(adjustments.count(), 5)
+
+        # 半成品 1:1 扣减
+        self.shell.refresh_from_db()
+        self.cable.refresh_from_db()
+        self.assertEqual(self.shell.stock_quantity, Decimal('90'))    # 100 - 10
+        self.assertEqual(self.cable.stock_quantity, Decimal('-10'))   # 0 - 10（允许负）
+
+        # 原材料按 quantity × quantity_per_unit 扣减
+        self.raw_chip.refresh_from_db()
+        self.raw_cap.refresh_from_db()
+        self.raw_bare.refresh_from_db()
+        self.assertEqual(self.raw_chip.stock_quantity, Decimal('90'))   # 100 - 10×1
+        self.assertEqual(self.raw_cap.stock_quantity, Decimal('450'))   # 500 - 10×5
+        self.assertEqual(self.raw_bare.stock_quantity, Decimal('90'))   # 100 - 10×1
+
+        # executed_at 被自动设置
+        order.refresh_from_db()
+        self.assertIsNotNone(order.executed_at)
+
+    def test_execute_is_idempotent(self):
+        """EXECUTED 后再 save 不应重复扣料（幂等保护）。"""
+        order = self._make_production_order_with_line(10)
+        order.status = 'EXECUTED'
+        order.save()
+
+        # 第二次 save——比如改了 note——应该没有任何新 StockAdjustment
+        before = StockAdjustment.objects.count()
+        order.note = '改了 note 一下'
+        order.save()
+        after = StockAdjustment.objects.count()
+        self.assertEqual(before, after, '重复保存 EXECUTED 单不应再写扣料条目')
+
+    def test_planned_does_not_trigger_consumption(self):
+        """PLANNED 状态保存不应触发扣料。"""
+        order = self._make_production_order_with_line(5)
+        # 默认就是 PLANNED，保存不会扣料
+        self.shell.refresh_from_db()
+        self.assertEqual(self.shell.stock_quantity, Decimal('100'))
+        self.assertIsNone(order.executed_at)
+        self.assertFalse(
+            StockAdjustment.objects.filter(adjustment_type='PRODUCE_CONSUME').exists(),
+        )
+
+    def test_allows_negative_stock(self):
+        """超过现有库存的排产也能正常 EXECUTED——半成品/原材料补货节奏与排产解耦。"""
+        order = self._make_production_order_with_line(200)  # > shell 的 100
+        order.status = 'EXECUTED'
+        order.save()
+        self.shell.refresh_from_db()
+        self.assertEqual(self.shell.stock_quantity, Decimal('-100'))
+        # 原材料同样可负
+        self.raw_chip.refresh_from_db()
+        self.assertEqual(self.raw_chip.stock_quantity, Decimal('-100'))  # 100 - 200×1
+        # 没有任何异常或拒绝
+
+
+class PcbPlanAPITest(APITestCase):
+    """PcbPlan CRUD API 与权限测试（BOM-2.0）。
+
+    覆盖：
+    - 权限：manager 可 CRUD；warehouse / shipper 403
+    - nested materials 写入：创建/更新可以一次性提交 plan + materials 列表
+    - 校验：``material.category.category_type`` 必须是 RAW_MATERIAL
+    - 销售明细写入：``pcb_plan`` 必须 is_active=True，否则拒绝
+    详见 docs/PRD.md §3.2 / §4.5 / §9.4 changelog 2026-05-21（PCB 方案改造）。
+    """
+
+    def setUp(self):
+        # 角色组
+        for grp in ('manager', 'warehouse', 'shipper'):
+            Group.objects.get_or_create(name=grp)
+        self.manager = User.objects.create_user(username='pcb_plan_manager', password='p')
+        self.manager.groups.add(Group.objects.get(name='manager'))
+        self.warehouse = User.objects.create_user(username='pcb_plan_warehouse', password='p')
+        self.warehouse.groups.add(Group.objects.get(name='warehouse'))
+
+        # 原材料 & 非原材料（用于校验测试）
+        self.cat_raw = Category.objects.create(name='方案测试原材料分类', category_type='RAW_MATERIAL')
+        self.cat_self = Category.objects.create(name='方案测试自产分类', category_type='SELF_MADE')
+        self.raw1 = Product.objects.create(
+            category=self.cat_raw, internal_code='PT-RAW-1', model_name='测试原材料 1',
+        )
+        self.raw2 = Product.objects.create(
+            category=self.cat_raw, internal_code='PT-RAW-2', model_name='测试原材料 2',
+        )
+        self.not_raw = Product.objects.create(
+            category=self.cat_self, internal_code='PT-SELF', model_name='测试自产件（非原材料）',
+        )
+
+    def _auth(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_create_with_nested_materials(self):
+        self._auth(self.manager)
+        payload = {
+            'name': '方案-A',
+            'code': 'A',
+            'is_active': True,
+            'materials': [
+                {'material': self.raw1.id, 'quantity_per_unit': '2.5', 'note': '主控'},
+                {'material': self.raw2.id, 'quantity_per_unit': '10', 'note': '电容'},
+            ],
+        }
+        resp = self.client.post('/api/core/pcb-plans/', payload, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['name'], '方案-A')
+        self.assertEqual(len(resp.data['materials']), 2)
+
+    def test_create_rejects_non_raw_material(self):
+        """方案明细的 material 必须是 RAW_MATERIAL 分类。"""
+        self._auth(self.manager)
+        payload = {
+            'name': '方案-Bad',
+            'materials': [
+                {'material': self.not_raw.id, 'quantity_per_unit': '1'},
+            ],
+        }
+        resp = self.client.post('/api/core/pcb-plans/', payload, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_create_rejects_zero_quantity(self):
+        """quantity_per_unit 必须 > 0。"""
+        self._auth(self.manager)
+        payload = {
+            'name': '方案-ZeroQty',
+            'materials': [
+                {'material': self.raw1.id, 'quantity_per_unit': '0'},
+            ],
+        }
+        resp = self.client.post('/api/core/pcb-plans/', payload, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_update_replaces_materials(self):
+        """传 materials 列表时全量替换（删旧建新）。"""
+        from core.models import PcbPlan, PcbPlanMaterial
+        plan = PcbPlan.objects.create(name='方案-Upd', code='U')
+        PcbPlanMaterial.objects.create(plan=plan, material=self.raw1, quantity_per_unit=Decimal('1'))
+        self._auth(self.manager)
+
+        # 替换为只含 raw2 的列表
+        resp = self.client.patch(
+            f'/api/core/pcb-plans/{plan.id}/',
+            {'materials': [{'material': self.raw2.id, 'quantity_per_unit': '3'}]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        plan.refresh_from_db()
+        materials = list(plan.materials.all())
+        self.assertEqual(len(materials), 1)
+        self.assertEqual(materials[0].material_id, self.raw2.id)
+        self.assertEqual(materials[0].quantity_per_unit, Decimal('3'))
+
+    def test_warehouse_cannot_write(self):
+        self._auth(self.warehouse)
+        resp = self.client.post('/api/core/pcb-plans/', {'name': 'X'}, format='json')
+        self.assertEqual(resp.status_code, 403)
+        # GET 也是 manager only
+        resp = self.client.get('/api/core/pcb-plans/')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_inactive_plan_rejected_by_sales_item(self):
+        """已下架方案不可被新销售明细选中（serializer 校验）。"""
+        from core.models import PcbPlan
+        from business.models import SalesOrder
+        from core.models import Partner
+
+        # 准备销售单环境
+        partner = Partner.objects.create(name='方案测试客户', partner_type='CUSTOMER')
+        order = SalesOrder.objects.create(
+            order_no='SO-PCB-TEST', partner=partner, operator='m', total_amount=Decimal('0'),
+        )
+        cable_cat = Category.objects.create(name='方案测试线材', category_type='CABLE')
+        cable = Product.objects.create(category=cable_cat, internal_code='PT-CB', model_name='测试线材')
+        shell_prod = Product.objects.create(category=self.cat_self, internal_code='PT-SH', model_name='测试外壳')
+        plan_off = PcbPlan.objects.create(name='已下架方案', is_active=False)
+
+        self._auth(self.manager)
+        resp = self.client.patch(
+            f'/api/business/sales-orders/{order.id}/',
+            {
+                'items_payload': [{
+                    'product': shell_prod.id, 'pcb_plan': plan_off.id, 'cable': cable.id,
+                    'custom_product_name': 'X', 'price': '1', 'quantity': '1',
+                }],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)

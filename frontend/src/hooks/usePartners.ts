@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, PartnersQueryParams } from '../api/client';
+import {
+  buildListQueryParams,
+  UseListHookOptions,
+  UseListHookResult,
+  useListResource,
+} from './listHookHelpers';
 
-export type PartnerType = 'CUSTOMER' | 'SUPPLIER' | 'BOTH';
+export type PartnerType = 'CUSTOMER' | 'SUPPLIER' | 'BOTH' | 'SELF';
 
 export interface PartnerResponse {
   id: number;
@@ -10,36 +15,28 @@ export interface PartnerResponse {
   balance: number;
 }
 
-export function usePartners(enabled = true) {
-  const [data, setData] = useState<PartnerResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export type PartnersFilters = object;
 
-  const fetchPartners = useCallback(async () => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-    try {
-      setLoading(true);
-      const response = await api.getPartners();
-      const resolved = Array.isArray((response as any).results) ? (response as any).results : response;
-      const normalized: PartnerResponse[] = resolved.map((partner: any) => ({
-        ...partner,
-        balance: Number(partner.balance ?? 0),
-      }));
-      setData(normalized);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载合作方失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [enabled]);
+function normalizePartner(raw: any): PartnerResponse {
+  return {
+    ...raw,
+    balance: Number(raw.balance ?? 0),
+  };
+}
 
-  useEffect(() => {
-    fetchPartners();
-  }, [fetchPartners]);
+type LegacyArg = boolean;
 
-  return { data, loading, error, reload: fetchPartners };
+export function usePartners(
+  optionsOrEnabled: UseListHookOptions<PartnersFilters> | LegacyArg = {},
+): UseListHookResult<PartnerResponse> {
+  const options: UseListHookOptions<PartnersFilters> =
+    typeof optionsOrEnabled === 'boolean'
+      ? { enabled: optionsOrEnabled }
+      : optionsOrEnabled;
+  return useListResource<PartnerResponse, PartnersFilters>({
+    options,
+    toQueryParams: buildListQueryParams,
+    fetcher: (qp) => api.getPartners(qp as PartnersQueryParams),
+    normalize: normalizePartner,
+  });
 }

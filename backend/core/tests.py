@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.contrib.auth.models import Group, User
 from django.test import TestCase
 from django.db.utils import IntegrityError
 from rest_framework.test import APIClient
@@ -45,10 +46,21 @@ class CoreDataTest(TestCase):
 
 
 class ProductAPITest(TestCase):
-    """利用 DRF APIClient 创建 mock 数据，并验证产品列表接口"""
+    """利用 DRF APIClient 创建 mock 数据，并验证产品列表接口。
+
+    注意：`/api/core/products/` 现在需要 manager / warehouse 角色才能 GET
+    （详见 docs/PRD.md §9.4 changelog 2026-05-11，shipper 不消费此接口）。
+    测试通过 force_authenticate 一个 manager 用户来满足权限要求。
+    """
 
     def setUp(self):
         self.client = APIClient()
+        # 鉴权：products GET 需 manager / warehouse；这里给一个 manager 用户。
+        manager_group, _ = Group.objects.get_or_create(name='manager')
+        self.user = User.objects.create_user(username='product_api_test_manager')
+        self.user.groups.add(manager_group)
+        self.client.force_authenticate(user=self.user)
+
         self.shell_category = Category.objects.create(name="自产外壳", category_type="SELF_MADE")
         self.raw_category = Category.objects.create(name="塑料颗粒", category_type="RAW_MATERIAL")
 
@@ -69,9 +81,12 @@ class ProductAPITest(TestCase):
         response = self.client.get('/api/core/products/')
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(len(payload), 2)
+        # DRF 默认开启了 PageNumberPagination（PAGE_SIZE=20），响应是
+        # {count, next, previous, results} 的分页结构而不是裸列表。
+        products = payload['results'] if isinstance(payload, dict) and 'results' in payload else payload
+        self.assertEqual(len(products), 2)
 
-        products_by_code = {item['internal_code']: item for item in payload}
+        products_by_code = {item['internal_code']: item for item in products}
         shell_payload = products_by_code['2026-SH-GL-BK']
         raw_payload = products_by_code['RM-ABS-01']
 
@@ -83,3 +98,27 @@ class ProductAPITest(TestCase):
 
         self.assertEqual(raw_payload['category_detail']['name'], self.raw_category.name)
         self.assertEqual(Decimal(raw_payload['stock_quantity']), Decimal('2000'))
+
+
+class HealthCheckTest(TestCase):
+    """/health/ 端点回归：
+
+    1. 未鉴权也能 200（部署反代探活必须无需 token）
+    2. 返回体形如 {"status": "ok"}
+
+    详见 docs/PRD.md §9.2 changelog 2026-05-21 与 rules/deployment-rules.md §6。
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_health_returns_ok_without_auth(self):
+        response = self.client.get('/health/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_health_works_even_with_invalid_token(self):
+        """即使带了错误的 token，health 也不能抛 401——authentication_classes=[]."""
+        self.client.credentials(HTTP_AUTHORIZATION='Bearer not-a-real-token')
+        response = self.client.get('/health/')
+        self.assertEqual(response.status_code, 200)

@@ -6,6 +6,24 @@ interface Props {
   events: any[];
   mode: 'purchase' | 'sales';
   orderId?: number;
+  // 调用方（SalesOrdersPanel / PurchasePanel）会传入"添加事件"回调，
+  // 当前组件内部没有用，但保留在签名里是为了让父组件可以在未来扩展
+  // 比如在 events 列表底部加"添加一条"按钮——不传也合法。
+  onAddEvent?: (orderId: number) => void;
+}
+
+/**
+ * 金额字段渲染：null / undefined / '' / NaN 一律渲染为占位符 '-'。
+ *
+ * 后端 MonetaryMaskMixin 对非 manager 会把 `price` 字段置为 null（不是 0）；
+ * 直接 Number(null) = 0 会把"未授权"静默展示成"¥0.00"——§9.2 #16 登记的
+ * 金额脱敏地雷（2026-05-21 修复）。见 rules/frontend-rules.md §2.1。
+ */
+function formatMoney(value: unknown, fallback = '-'): string {
+  if (value === null || value === undefined || value === '') return fallback;
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (Number.isNaN(numeric)) return fallback;
+  return `¥ ${numeric.toFixed(2)}`;
 }
 
 export default function OrderDetailsView({ items, events, mode }: Props) {
@@ -39,8 +57,13 @@ export default function OrderDetailsView({ items, events, mode }: Props) {
               )}
               
               <div className="mt-3 flex justify-between items-center text-[15px] text-slate-400 border-t border-slate-50 pt-2">
-                <span>单价: ¥ {Number(item.price).toFixed(2)}</span>
-                <span className="font-bold text-slate-700">小计: ¥ {(Number(item.price) * Number(item.quantity)).toFixed(2)}</span>
+                <span>单价: {formatMoney(item.price)}</span>
+                <span className="font-bold text-slate-700">
+                  {/* 小计：单价为 null 时，小计也展示 '-'（不要把 null * quantity 当 0） */}
+                  小计: {item.price === null || item.price === undefined || item.price === ''
+                    ? '-'
+                    : formatMoney(Number(item.price) * Number(item.quantity))}
+                </span>
               </div>
             </div>
           ))}
