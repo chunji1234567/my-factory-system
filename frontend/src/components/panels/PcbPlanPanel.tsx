@@ -1,26 +1,39 @@
 import { useState, useMemo } from 'react';
 import { api } from '../../api/client';
 import { usePcbPlans, PcbPlanResponse } from '../../hooks/usePcbPlans';
-import { useProducts, ProductResponse } from '../../hooks/useProducts';
-import NavbarButton from '../common/NavbarButton';
+import { useProducts } from '../../hooks/useProducts';
 import Modal from '../common/Modal';
 import Pagination from '../common/Pagination';
-import FilterBar from '../common/FilterBar';
+import {
+  Card,
+  PageHeader,
+  Section,
+  Pill,
+  ActionBar,
+  SearchableSelect,
+  ModalFooterButtons,
+} from '../primitives';
 
 /**
- * PCB 方案管理面板（manager only，BOM-2.0）。
+ * PCB 方案管理面板（manager only，BOM-2.0，Stage C-10 redesign 2026-06-18）。
  *
- * - 列表：所有方案（含已下架），按是否启用 + 名字排序
- * - 详情/编辑：物料配方逐行编辑（add/remove，全量替换）
- * - 启用/下架：用 is_active 软删除——历史排产明细仍能引用，但新订单选不到
+ * 业务模型（详见 docs/PRD.md §3.2 §4.5 §9.4 changelog 2026-05-21）：
+ *   - 方案 = 一种 PCB 板的物料配方；销售明细挂方案，排产时按方案展开扣减原材料
+ *   - is_active 软删除——下架后历史排产仍能引用，但新订单选不到
  *
- * 详见 docs/PRD.md §3.2 §4.5 §9.4 changelog 2026-05-21（PCB 方案改造）。
+ * 改造要点（详见 docs/ux-audit.md §2.10）：
+ *   1. PageHeader 替换自造 h2 + 英文副标题
+ *   2. 筛选改 Pill toggle（仅启用中 / 包含已下架）
+ *   3. 方案卡：默认折叠物料（显示 "10 种 ▾"），点击展开 Pill 网格
+ *   4. 编辑 Modal 用 Section 分段；物料下拉换 SearchableSelect（原材料数量大）
+ *   5. 物料行改 Card tone="subtle"，删除按钮统一 design tokens
+ *   6. 删掉"全量替换"提示——后端实现细节不该泄露给用户
  */
 
 const PAGE_SIZE = 20;
 
 interface MaterialDraft {
-  material: string;          // Product ID（字符串以适配下拉）
+  material: string; // Product ID（字符串以适配 SearchableSelect）
   quantity_per_unit: string;
   note: string;
 }
@@ -41,6 +54,11 @@ const EMPTY_FORM: FormState = {
   materials: [{ material: '', quantity_per_unit: '', note: '' }],
 };
 
+const FIELD_LABEL_CLS = 'text-micro font-bold text-ink-faint uppercase tracking-wider ml-0.5';
+const INPUT_CLS =
+  'w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none ' +
+  'focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors';
+
 export default function PcbPlanPanel() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
@@ -56,23 +74,48 @@ export default function PcbPlanPanel() {
   // 原材料下拉源：仅 RAW_MATERIAL 类目
   const productsQuery = useProducts({ enabled: true, pageSize: 500 });
   const rawMaterials = useMemo(
-    () => productsQuery.data.filter((p) => p.category_detail?.category_type === 'RAW_MATERIAL'),
+    () =>
+      productsQuery.data.filter(
+        (p) => p.category_detail?.category_type === 'RAW_MATERIAL',
+      ),
     [productsQuery.data],
+  );
+  const rawMaterialOptions = useMemo(
+    () =>
+      rawMaterials.map((p) => ({
+        value: String(p.id),
+        label: `${p.model_name} (${p.internal_code})`,
+      })),
+    [rawMaterials],
   );
 
   // 模态框 + 表单
-  const [modal, setModal] = useState<{ open: boolean; mode: 'create' | 'edit'; planId: number | null }>({
-    open: false, mode: 'create', planId: null,
-  });
+  const [modal, setModal] = useState<{
+    open: boolean;
+    mode: 'create' | 'edit';
+    planId: number | null;
+  }>({ open: false, mode: 'create', planId: null });
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [isSaving, setIsSaving] = useState(false);
 
-  // 客户端搜索过滤（小数据集即可，避免每次输都打后端）
+  // 卡片展开状态：planId → 是否展开物料
+  const [expandedPlans, setExpandedPlans] = useState<Set<number>>(new Set());
+  const toggleExpand = (planId: number) => {
+    setExpandedPlans((prev) => {
+      const next = new Set(prev);
+      if (next.has(planId)) next.delete(planId);
+      else next.add(planId);
+      return next;
+    });
+  };
+
+  // 客户端搜索过滤
   const visiblePlans = useMemo(() => {
     if (!search.trim()) return plansQuery.data;
     const kw = search.trim().toLowerCase();
     return plansQuery.data.filter(
-      (p) => p.name.toLowerCase().includes(kw) || p.code.toLowerCase().includes(kw),
+      (p) =>
+        p.name.toLowerCase().includes(kw) || p.code.toLowerCase().includes(kw),
     );
   }, [plansQuery.data, search]);
 
@@ -127,7 +170,6 @@ export default function PcbPlanPanel() {
     const validMaterials = form.materials.filter(
       (m) => m.material && Number(m.quantity_per_unit) > 0,
     );
-    // 没有 materials 也允许保存（占位方案）；后端会接受空列表
     try {
       setIsSaving(true);
       const payload = {
@@ -159,7 +201,6 @@ export default function PcbPlanPanel() {
     const verb = plan.is_active ? '下架' : '启用';
     if (!window.confirm(`确定要${verb}方案「${plan.name}」吗？`)) return;
     try {
-      // **不传 materials**——避免误清空配方
       await api.updatePcbPlan(plan.id, { is_active: !plan.is_active });
       plansQuery.reload();
     } catch (err: any) {
@@ -167,109 +208,112 @@ export default function PcbPlanPanel() {
     }
   };
 
-  // 原材料展示助手：从 productsQuery 找回物料名
+  // 物料名解析（嵌套 material_detail 缺失时回退到 productsQuery）
   const fmtMaterial = (materialId: number) => {
     const p = productsQuery.data.find((x) => x.id === materialId);
     if (!p) return `#${materialId}`;
-    return `${p.model_name}（${p.internal_code}）`;
+    return `${p.model_name} (${p.internal_code})`;
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
-      {/* 标题区 */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">PCB 方案</h2>
-          <p className="text-xs text-slate-400 mt-1 uppercase font-bold tracking-widest">PCB Plans · BOM Recipes</p>
-        </div>
-        <button
-          onClick={openCreate}
-          className="rounded-full bg-slate-900 px-6 py-2 text-sm font-bold text-white shadow-lg active:scale-95 transition-all"
-        >
-          + 新建方案
-        </button>
-      </div>
+    <div className="space-y-section-gap animate-in fade-in duration-500 pb-20">
+      <PageHeader
+        title="PCB 方案"
+        description="维护 PCB 方案配方（排产时按方案展开扣减原材料）"
+        actions={
+          <button
+            onClick={openCreate}
+            className="rounded-pill bg-primary text-on-primary px-5 py-2 text-caption font-bold
+                       hover:bg-primary-hover active:scale-95 transition-all shadow-card"
+          >
+            + 新建方案
+          </button>
+        }
+      />
 
       {/* 筛选区 */}
-      <FilterBar
-        actions={
-          <NavbarButton variant="outline" className="text-xs" onClick={() => { setSearch(''); setIncludeInactive(false); }}>
-            重置
-          </NavbarButton>
-        }
-      >
-        <FilterBar.Field label="名称 / 编号">
-          <input
-            className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm outline-none focus:border-slate-900"
-            placeholder="输入名称或方案编号..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </FilterBar.Field>
-        <FilterBar.Field label="包含已下架">
-          <select
-            className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm bg-white outline-none focus:border-slate-900"
-            value={includeInactive ? 'all' : 'active'}
-            onChange={(e) => { setIncludeInactive(e.target.value === 'all'); setPage(1); }}
-          >
-            <option value="active">仅启用中</option>
-            <option value="all">全部</option>
-          </select>
-        </FilterBar.Field>
-      </FilterBar>
+      <Card flat tone="subtle" padding="tight">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="flex-1 max-w-md">
+            <input
+              className={INPUT_CLS}
+              placeholder="按名称 / 方案编号搜索..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <div className="flex items-center gap-1 flex-wrap">
+            <button
+              type="button"
+              onClick={() => {
+                setIncludeInactive(false);
+                setPage(1);
+              }}
+              className={`px-3 py-1 rounded-pill text-caption font-bold transition-colors ${
+                !includeInactive
+                  ? 'bg-primary text-on-primary'
+                  : 'bg-surface text-ink-body border border-line hover:border-line-focus'
+              }`}
+            >
+              仅启用中
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIncludeInactive(true);
+                setPage(1);
+              }}
+              className={`px-3 py-1 rounded-pill text-caption font-bold transition-colors ${
+                includeInactive
+                  ? 'bg-primary text-on-primary'
+                  : 'bg-surface text-ink-body border border-line hover:border-line-focus'
+              }`}
+            >
+              包含已下架
+            </button>
+            {(search || includeInactive) && (
+              <button
+                onClick={() => {
+                  setSearch('');
+                  setIncludeInactive(false);
+                  setPage(1);
+                }}
+                className="ml-2 text-micro text-ink-faint hover:text-ink-body underline"
+              >
+                重置
+              </button>
+            )}
+          </div>
+        </div>
+      </Card>
 
       {/* 列表 */}
       {plansQuery.loading ? (
-        <div className="text-center py-10 text-slate-400">加载中...</div>
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-8">加载中...</p>
+        </Card>
       ) : plansQuery.error ? (
-        <div className="p-4 bg-rose-50 text-rose-600 rounded-2xl text-sm">⚠️ {plansQuery.error}</div>
+        <Card tone="danger" padding="tight">
+          <p className="text-caption text-danger-ink">⚠ {plansQuery.error}</p>
+        </Card>
       ) : visiblePlans.length === 0 ? (
-        <div className="text-center py-10 border-2 border-dashed border-slate-100 rounded-3xl text-slate-400">
-          暂无方案
-        </div>
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-10">
+            {search || includeInactive ? '没有匹配的方案' : '暂无方案'}
+          </p>
+        </Card>
       ) : (
         <div className="space-y-3">
           {visiblePlans.map((plan) => (
-            <div
+            <PlanCard
               key={plan.id}
-              className={`bg-white rounded-3xl border p-5 shadow-sm transition-all ${
-                plan.is_active ? 'border-slate-100 hover:shadow-md' : 'border-slate-200 opacity-60'
-              }`}
-            >
-              <div className="flex justify-between items-start mb-3">
-                <div>
-                  <h3 className="font-bold text-slate-900">
-                    {plan.name}
-                    {plan.code ? <span className="text-slate-400 font-mono ml-2 text-xs">({plan.code})</span> : null}
-                    {!plan.is_active && <span className="ml-2 text-[10px] bg-slate-100 px-2 py-0.5 rounded text-slate-500">已下架</span>}
-                  </h3>
-                  {plan.description && <p className="text-xs text-slate-500 mt-1">{plan.description}</p>}
-                </div>
-                <div className="flex gap-2">
-                  <NavbarButton variant="outline" className="text-[10px] py-1 px-3" onClick={() => openEdit(plan)}>
-                    编辑
-                  </NavbarButton>
-                  <NavbarButton variant="outline" className="text-[10px] py-1 px-3" onClick={() => toggleActive(plan)}>
-                    {plan.is_active ? '下架' : '启用'}
-                  </NavbarButton>
-                </div>
-              </div>
-
-              {/* 物料配方展开 */}
-              {plan.materials.length === 0 ? (
-                <p className="text-xs text-slate-400 italic">未配置物料</p>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-[12px]">
-                  {plan.materials.map((m) => (
-                    <div key={m.id} className="bg-slate-50 rounded-xl px-3 py-2">
-                      <span className="font-medium">{m.material_detail?.model_name ?? fmtMaterial(m.material)}</span>
-                      <span className="text-slate-400 ml-2">× {m.quantity_per_unit}</span>
-                      {m.note && <span className="block text-[10px] text-slate-400 italic mt-1">{m.note}</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+              plan={plan}
+              expanded={expandedPlans.has(plan.id)}
+              onToggleExpand={() => toggleExpand(plan.id)}
+              onEdit={() => openEdit(plan)}
+              onToggleActive={() => toggleActive(plan)}
+              fmtMaterial={fmtMaterial}
+            />
           ))}
         </div>
       )}
@@ -281,130 +325,267 @@ export default function PcbPlanPanel() {
         onPageChange={setPage}
       />
 
-      {/* 编辑/创建模态框 */}
+      {/* 编辑/创建 Modal */}
       <Modal
         open={modal.open}
         onClose={() => setModal({ ...modal, open: false })}
         title={modal.mode === 'create' ? '新建 PCB 方案' : '编辑 PCB 方案'}
         maxWidth="max-w-3xl"
         footer={
-          <NavbarButton disabled={isSaving} onClick={handleSubmit} className="px-10">
-            {isSaving ? '保存中...' : '保存方案'}
-          </NavbarButton>
+          <ModalFooterButtons
+            onCancel={() => setModal({ ...modal, open: false })}
+            onSubmit={handleSubmit}
+            isSaving={isSaving}
+            submitDisabled={!form.name.trim()}
+            submitLabel="保存方案"
+            savingLabel="保存中..."
+          />
         }
       >
-        <div className="space-y-5 py-2">
-          {/* 基本信息 */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="sm:col-span-2">
-              <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1 block">方案名称*</label>
-              <input
-                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="例：M1 控制板 v1"
-              />
+        <div className="space-y-section-gap">
+          {/* 基础信息 */}
+          <Section title="① 基础信息">
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="md:col-span-2 space-y-1">
+                  <span className={FIELD_LABEL_CLS}>方案名称*</span>
+                  <input
+                    className={INPUT_CLS}
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    placeholder="例：M1 控制板 v1"
+                    autoFocus
+                  />
+                </div>
+                <div className="space-y-1">
+                  <span className={FIELD_LABEL_CLS}>方案编号</span>
+                  <input
+                    className={`${INPUT_CLS} font-mono`}
+                    value={form.code}
+                    onChange={(e) => setForm({ ...form, code: e.target.value })}
+                    placeholder="可选"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <span className={FIELD_LABEL_CLS}>说明（可选）</span>
+                <textarea
+                  rows={2}
+                  className={`${INPUT_CLS} resize-none`}
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  placeholder="用于说明这个方案的特殊之处"
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer text-caption text-ink-body">
+                <input
+                  type="checkbox"
+                  checked={form.is_active}
+                  onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
+                  className="w-4 h-4 rounded border-line text-primary focus:ring-primary/20"
+                />
+                <span>
+                  启用中（下架后历史订单仍保留引用，但新订单选不到）
+                </span>
+              </label>
             </div>
-            <div>
-              <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1 block">方案编号</label>
-              <input
-                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
-                value={form.code}
-                onChange={(e) => setForm({ ...form, code: e.target.value })}
-                placeholder="可选"
-              />
-            </div>
-          </div>
+          </Section>
 
-          <div>
-            <label className="text-[11px] font-bold text-slate-400 uppercase tracking-widest ml-1 block">说明</label>
-            <textarea
-              rows={2}
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm resize-none focus:ring-2 focus:ring-slate-900/5 outline-none"
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              placeholder="可选，用于说明这个方案的特殊之处"
-            />
-          </div>
-
-          {/* 物料配方表 */}
-          <div>
-            <div className="flex justify-between items-center mb-2">
-              <h4 className="text-sm font-bold uppercase tracking-widest text-slate-400">物料配方</h4>
-              <button
-                type="button"
-                onClick={addMaterialRow}
-                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50"
-              >
-                + 添加物料行
-              </button>
-            </div>
+          {/* 物料配方 */}
+          <Section
+            title={`② 物料配方（${form.materials.length} 条）`}
+            action={
+              <ActionBar align="end">
+                <ActionBar.GhostButton onClick={addMaterialRow}>
+                  + 添加物料
+                </ActionBar.GhostButton>
+              </ActionBar>
+            }
+          >
             {form.materials.length === 0 ? (
-              <p className="text-xs text-slate-400 italic">未配置物料（可后续追加）</p>
+              <Card flat tone="subtle" padding="tight">
+                <p className="text-center text-caption text-ink-faint py-6">
+                  还未配置物料，点右上方"+ 添加物料"开始
+                </p>
+              </Card>
             ) : (
               <div className="space-y-2">
                 {form.materials.map((m, idx) => (
-                  <div key={idx} className="grid grid-cols-12 gap-2 items-start">
-                    <div className="col-span-6">
-                      <select
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white outline-none focus:border-slate-900"
-                        value={m.material}
-                        onChange={(e) => updateMaterial(idx, { material: e.target.value })}
-                      >
-                        <option value="">{rawMaterials.length ? '选择原材料' : '尚无 RAW_MATERIAL 物料'}</option>
-                        {rawMaterials.map((p: ProductResponse) => (
-                          <option key={p.id} value={p.id}>{p.model_name}（{p.internal_code}）</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="col-span-2">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                        placeholder="单板用量"
-                        value={m.quantity_per_unit}
-                        onChange={(e) => updateMaterial(idx, { quantity_per_unit: e.target.value })}
-                      />
-                    </div>
-                    <div className="col-span-3">
-                      <input
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                        placeholder="备注（可选）"
-                        value={m.note}
-                        onChange={(e) => updateMaterial(idx, { note: e.target.value })}
-                      />
-                    </div>
-                    <div className="col-span-1">
-                      <button
-                        onClick={() => removeMaterialRow(idx)}
-                        className="w-full bg-rose-500 text-white rounded-full py-2 text-xs hover:scale-105 transition-transform"
-                      >
-                        ×
-                      </button>
-                    </div>
+                  <MaterialEditRow
+                    key={idx}
+                    draft={m}
+                    index={idx}
+                    options={rawMaterialOptions}
+                    onChange={(patch) => updateMaterial(idx, patch)}
+                    onRemove={() => removeMaterialRow(idx)}
+                  />
+                ))}
+              </div>
+            )}
+          </Section>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+// ============================================================================
+// 方案卡
+// ============================================================================
+
+interface PlanCardProps {
+  plan: PcbPlanResponse;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  onEdit: () => void;
+  onToggleActive: () => void;
+  fmtMaterial: (id: number) => string;
+}
+
+function PlanCard({
+  plan,
+  expanded,
+  onToggleExpand,
+  onEdit,
+  onToggleActive,
+  fmtMaterial,
+}: PlanCardProps) {
+  const hasMaterials = plan.materials.length > 0;
+  return (
+    <Card tone={plan.is_active ? 'default' : 'subtle'} className={!plan.is_active ? 'opacity-70' : ''}>
+      {/* 头部：名字 + 编号 + 状态 + 操作 */}
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-subheading text-ink">{plan.name}</p>
+            {plan.code && (
+              <span className="text-micro font-mono text-ink-faint">({plan.code})</span>
+            )}
+            <Pill tone={plan.is_active ? 'success' : 'muted'}>
+              {plan.is_active ? '启用中' : '已下架'}
+            </Pill>
+          </div>
+          {plan.description && (
+            <p className="text-caption text-ink-muted mt-1">{plan.description}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={onEdit}
+            className="rounded-pill border border-line-strong text-ink-body px-3 py-1 text-micro font-bold
+                       hover:bg-surface-subtle hover:border-line-focus transition-all"
+          >
+            编辑
+          </button>
+          <button
+            onClick={onToggleActive}
+            className="rounded-pill border border-line-strong text-ink-body px-3 py-1 text-micro font-bold
+                       hover:bg-surface-subtle hover:border-line-focus transition-all"
+          >
+            {plan.is_active ? '下架' : '启用'}
+          </button>
+        </div>
+      </div>
+
+      {/* 物料折叠 / 展开 */}
+      <div className="mt-4 pt-3 border-t border-line">
+        {!hasMaterials ? (
+          <p className="text-caption text-ink-faint italic">未配置物料</p>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={onToggleExpand}
+              className="flex items-center gap-2 text-caption text-ink-body hover:text-primary transition-colors"
+            >
+              <span className="font-bold">{plan.materials.length} 种物料</span>
+              <span className="text-ink-faint">{expanded ? '▴ 收起' : '▾ 展开查看'}</span>
+            </button>
+            {expanded && (
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {plan.materials.map((m) => (
+                  <div
+                    key={m.id}
+                    className="rounded-input bg-surface-subtle px-3 py-2 text-caption"
+                  >
+                    <p className="font-bold text-ink truncate" title={m.material_detail?.model_name ?? fmtMaterial(m.material)}>
+                      {m.material_detail?.model_name ?? fmtMaterial(m.material)}
+                    </p>
+                    <p className="text-micro text-ink-faint font-mono mt-0.5">
+                      × {m.quantity_per_unit}
+                    </p>
+                    {m.note && (
+                      <p className="text-micro text-ink-muted italic mt-1">{m.note}</p>
+                    )}
                   </div>
                 ))}
               </div>
             )}
-            <p className="text-[10px] text-slate-400 mt-2 italic">
-              提示：编辑方案时，提交后会**全量替换**物料列表（删旧建新）。如果只想改基本信息（名称/启用状态），不要触发添加/删除物料行。
-            </p>
-          </div>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
 
-          {/* 启用状态 */}
-          <label className="flex items-center gap-2 cursor-pointer text-sm">
-            <input
-              type="checkbox"
-              checked={form.is_active}
-              onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
-              className="w-4 h-4 rounded border-slate-300"
-            />
-            <span>启用中（下架后历史订单仍保留引用，但新订单选不到）</span>
-          </label>
+// ============================================================================
+// 物料编辑行（Modal 内）
+// ============================================================================
+
+interface MaterialEditRowProps {
+  draft: MaterialDraft;
+  index: number;
+  options: { value: string; label: string }[];
+  onChange: (patch: Partial<MaterialDraft>) => void;
+  onRemove: () => void;
+}
+
+function MaterialEditRow({ draft, index, options, onChange, onRemove }: MaterialEditRowProps) {
+  return (
+    <Card tone="subtle" padding="tight">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-micro font-mono text-ink-faint">#{index + 1}</span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="text-micro font-bold text-ink-faint hover:text-danger transition-colors px-2 py-1"
+        >
+          删除
+        </button>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_7rem_minmax(0,1fr)] gap-2">
+        <div className="space-y-1">
+          <span className={FIELD_LABEL_CLS}>原材料</span>
+          <SearchableSelect
+            options={options}
+            value={draft.material}
+            onChange={(v) => onChange({ material: v })}
+            placeholder={options.length ? '请选择原材料（可搜索）' : '尚无原材料'}
+            disabled={!options.length}
+          />
         </div>
-      </Modal>
-    </div>
+        <div className="space-y-1">
+          <span className={FIELD_LABEL_CLS}>单板用量</span>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            className={`${INPUT_CLS} font-mono text-right`}
+            value={draft.quantity_per_unit}
+            onChange={(e) => onChange({ quantity_per_unit: e.target.value })}
+            placeholder="例：2"
+          />
+        </div>
+        <div className="space-y-1">
+          <span className={FIELD_LABEL_CLS}>备注（可选）</span>
+          <input
+            className={INPUT_CLS}
+            value={draft.note}
+            onChange={(e) => onChange({ note: e.target.value })}
+            placeholder="例：贴片正面"
+          />
+        </div>
+      </div>
+    </Card>
   );
 }

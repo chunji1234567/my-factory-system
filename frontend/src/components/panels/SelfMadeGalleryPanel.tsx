@@ -3,8 +3,38 @@ import type { ProductResponse } from '../../hooks/useProducts';
 import type { CategoryResponse } from '../../hooks/useCategories';
 import Pagination from '../common/Pagination';
 import Modal from '../common/Modal';
-import { api } from '../../api/client';
 import ProductForm from '../ProductForm';
+import { Card, PageHeader, Pill, SearchableSelect } from '../primitives';
+import {
+  SingleAdjustModal,
+  BatchAdjustModal,
+  type AdjustableProduct,
+} from './inventory/AdjustModals';
+
+/**
+ * 自产件图库（Stage C-7 redesign，2026-06-18）。
+ *
+ * 业务定位（用户 2026-06-18 反馈澄清）：
+ *   * 主用途是**用图片"认识"外壳/线材** —— 仓管员看图找货
+ *   * 自产件入库出库经常一批多个（线材 + 外壳一起做的一批送进仓）
+ *   * 因此需要：
+ *     - 图卡为主视觉
+ *     - 单件可调（出 / 入）
+ *     - 多件批量出入一次性提交
+ *
+ * 改造要点（详见 docs/ux-audit.md §2.7）：
+ *   1. PageHeader 替换自造 h2 + 副标题；右侧 actions = [+新建产品] [多件批量出入]
+ *   2. 标题"自产外壳图库"改"自产件图库"（含 SELF_MADE 外壳 + CABLE 线材）
+ *   3. 图卡：Card primitive 替代 rounded-2xl bg-slate-50 shadow-inner
+ *      - 图位上半，库存数字 + 出/入按钮在下半
+ *      - 单位 / 安全库存折叠到副信息（hover/小字），首屏不显著
+ *   4. 单件调整与批量调整 Modal 直接复用 inventory/AdjustModals 同款
+ *      —— 与 InventoryPanel 完全对称，UX 跨页一致
+ *   5. design tokens 全面铺开（slate / emerald / rose 退场）
+ */
+
+const SELF_MADE_TYPES = ['SELF_MADE', 'CABLE'] as const;
+const PAGE_SIZE = 12;
 
 interface Props {
   products: ProductResponse[];
@@ -15,7 +45,16 @@ interface Props {
   onRefreshCategories?: () => void;
 }
 
-const PAGE_SIZE = 12;
+/** 把后端的 snake_case ProductResponse 拍平成 AdjustModals 要的 camelCase 接口。 */
+function toAdjustable(p: ProductResponse): AdjustableProduct {
+  return {
+    id: p.id,
+    internalCode: p.internal_code,
+    modelName: p.model_name,
+    stockQuantity: Number(p.stock_quantity),
+    minStock: Number(p.min_stock),
+  };
+}
 
 export default function SelfMadeGalleryPanel({
   products,
@@ -26,47 +65,43 @@ export default function SelfMadeGalleryPanel({
   onRefreshCategories,
 }: Props) {
   const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<'ALL' | number>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<string>(''); // '' = 全部
   const [page, setPage] = useState(1);
+
   const [adjustProduct, setAdjustProduct] = useState<ProductResponse | null>(null);
-  const [adjustMode, setAdjustMode] = useState<'IN' | 'OUT'>('IN');
-  const [adjustQty, setAdjustQty] = useState('');
-  const [adjustNote, setAdjustNote] = useState('');
-  const [adjustError, setAdjustError] = useState<string | null>(null);
-  const [adjustSaving, setAdjustSaving] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [showProductModal, setShowProductModal] = useState(false);
 
-  // 自产件图库覆盖的分类：自产外壳（SELF_MADE）+ 线材（CABLE）。
-  // 业务上两者都是自家工坊每天生产送入库的成品（详见 docs/PRD.md §4.5
-  // 物理流程说明：外壳和线材自产，PCB 板外包贴片）。
-  const SELF_MADE_TYPES = ['SELF_MADE', 'CABLE'] as const;
-
+  // 范围内的产品 / 分类
   const selfMadeProducts = useMemo(
-    () => products.filter((product) =>
-      SELF_MADE_TYPES.includes((product.category_detail?.category_type ?? '') as any),
-    ),
+    () =>
+      products.filter((p) =>
+        SELF_MADE_TYPES.includes((p.category_detail?.category_type ?? '') as any),
+      ),
     [products],
   );
 
   const selfMadeCategories = useMemo(
-    () => categories.filter((category) =>
-      SELF_MADE_TYPES.includes(category.category_type as any),
-    ),
+    () => categories.filter((c) => SELF_MADE_TYPES.includes(c.category_type as any)),
     [categories],
   );
 
   const categoryOptions = useMemo(() => {
+    // 1. 优先使用 selfMadeCategories；2. 否则从 products 推导（兼容老数据）
     if (selfMadeCategories.length) {
-      return selfMadeCategories.map((category) => ({ value: category.id, label: category.name }));
+      return selfMadeCategories.map((c) => ({ value: String(c.id), label: c.name }));
     }
     const map = new Map<number, string>();
-    selfMadeProducts.forEach((product) => {
-      const id = product.category_detail?.id;
+    selfMadeProducts.forEach((p) => {
+      const id = p.category_detail?.id;
       if (id != null && !map.has(id)) {
-        map.set(id, product.category_detail?.name ?? '未分类');
+        map.set(id, p.category_detail?.name ?? '未分类');
       }
     });
-    return Array.from(map.entries()).map(([value, label]) => ({ value, label }));
+    return Array.from(map.entries()).map(([id, name]) => ({
+      value: String(id),
+      label: name,
+    }));
   }, [selfMadeCategories, selfMadeProducts]);
 
   useEffect(() => {
@@ -74,17 +109,15 @@ export default function SelfMadeGalleryPanel({
   }, [search, categoryFilter]);
 
   const filtered = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
-    return selfMadeProducts.filter((product) => {
-      if (categoryFilter !== 'ALL' && product.category_detail?.id !== categoryFilter) {
+    const kw = search.trim().toLowerCase();
+    return selfMadeProducts.filter((p) => {
+      if (categoryFilter && String(p.category_detail?.id ?? '') !== categoryFilter) {
         return false;
       }
-      if (!keyword) {
-        return true;
-      }
+      if (!kw) return true;
       return (
-        product.model_name.toLowerCase().includes(keyword) ||
-        product.internal_code.toLowerCase().includes(keyword)
+        p.model_name.toLowerCase().includes(kw) ||
+        p.internal_code.toLowerCase().includes(kw)
       );
     });
   }, [selfMadeProducts, search, categoryFilter]);
@@ -96,248 +129,159 @@ export default function SelfMadeGalleryPanel({
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, currentPage]);
 
-  const imageBase = import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : '');
+  // 全部自产件 → AdjustableProduct（给批量 Modal 的可加列表用）
+  const adjustablePool = useMemo(
+    () => selfMadeProducts.map(toAdjustable),
+    [selfMadeProducts],
+  );
+
+  // 图片路径解析
+  const imageBase =
+    import.meta.env.VITE_API_BASE_URL ||
+    (typeof window !== 'undefined' ? window.location.origin : '');
   const resolveImageUrl = (path?: string | null) => {
-    if (!path) {
-      return null;
-    }
-    if (/^https?:/i.test(path) || path.startsWith('data:')) {
-      return path;
-    }
+    if (!path) return null;
+    if (/^https?:/i.test(path) || path.startsWith('data:')) return path;
     return `${imageBase}${path}`;
   };
 
-  const handleOpenAdjust = (product: ProductResponse, mode: 'IN' | 'OUT') => {
-    setAdjustProduct(product);
-    setAdjustMode(mode);
-    setAdjustQty('');
-    setAdjustNote('');
-    setAdjustError(null);
-  };
-
-  const handleSubmitAdjust = async () => {
-    if (!adjustProduct) {
-      return;
-    }
-    const qty = Number(adjustQty);
-    if (!qty || Number.isNaN(qty) || qty <= 0) {
-      setAdjustError('请输入大于 0 的数量');
-      return;
-    }
-    setAdjustSaving(true);
-    setAdjustError(null);
-    try {
-      await api.createStockAdjustment({
-        product: adjustProduct.id,
-        adjustment_type: adjustMode === 'IN' ? 'MANUAL_IN' : 'MANUAL_OUT',
-        quantity: qty,
-        note: adjustNote,
-      });
-      setAdjustProduct(null);
-      onRefresh();
-    } catch (err) {
-      setAdjustError(err instanceof Error ? err.message : '库存调整失败');
-    } finally {
-      setAdjustSaving(false);
-    }
+  const resetFilters = () => {
+    setSearch('');
+    setCategoryFilter('');
+    setPage(1);
   };
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
-          <label className="flex-1 text-sm text-slate-600">
-            <span className="block">搜索型号或编号</span>
-            <input
-              className="mt-1 w-full rounded-full border border-slate-200 px-4 py-2"
-              placeholder="输入型号、编号关键字"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </label>
-          <label className="text-sm text-slate-600">
-            <span className="block">分类</span>
-            <select
-              className="mt-1 rounded-full border border-slate-200 px-4 py-2"
-              value={categoryFilter === 'ALL' ? 'ALL' : String(categoryFilter)}
-              onChange={(event) => {
-                const next = event.target.value === 'ALL' ? 'ALL' : Number(event.target.value);
-                setCategoryFilter(next);
-              }}
+    <div className="space-y-section-gap animate-in fade-in duration-500 pb-20">
+      <PageHeader
+        title="自产件图库"
+        description="外壳与线材的图片库，按图认料"
+        actions={
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setShowProductModal(true)}
+              className="rounded-pill border border-line-strong text-ink-body px-4 py-2 text-caption font-bold
+                         hover:bg-surface-subtle hover:border-line-focus transition-all"
             >
-              <option value="ALL">全部自产件</option>
-              {categoryOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700"
-            onClick={() => setShowProductModal(true)}
-          >
-            新建产品
-          </button>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-xl">
-              <span className="font-semibold text-slate-900">自产外壳图库</span>
-            </h2>
-            <p className="text-sm text-slate-500">共 {filtered.length}</p>
+              + 新建产品
+            </button>
+            <button
+              onClick={() => setBatchOpen(true)}
+              className="rounded-pill bg-primary text-on-primary px-5 py-2 text-caption font-bold
+                         hover:bg-primary-hover active:scale-95 transition-all shadow-card"
+            >
+              多件批量出入
+            </button>
           </div>
-          {loading && <span className="text-sm text-slate-500">加载中…</span>}
+        }
+      />
+
+      {/* 筛选区 */}
+      <Card flat tone="subtle" padding="tight">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center">
+          <div className="flex-1">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="按型号 / 编号搜索..."
+              className="w-full rounded-input border border-line bg-surface px-4 py-2 text-body outline-none
+                         focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors"
+            />
+          </div>
+          <div className="w-full md:w-64">
+            <SearchableSelect
+              options={categoryOptions}
+              value={categoryFilter}
+              onChange={setCategoryFilter}
+              placeholder="所有自产件分类"
+            />
+          </div>
+          {(search || categoryFilter) && (
+            <button
+              onClick={resetFilters}
+              className="text-micro text-ink-faint hover:text-ink-body underline shrink-0 self-start md:self-auto"
+            >
+              重置
+            </button>
+          )}
         </div>
-        {error && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-2 text-sm text-rose-600">{error}</p>}
-        {!loading && !filtered.length && (
-          <p className="mt-6 rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-500">
-            暂无符合条件的自产件。
+      </Card>
+
+      {/* 状态 / 数据 */}
+      {error && (
+        <Card tone="danger" padding="tight">
+          <p className="text-caption text-danger-ink">⚠ {error}</p>
+        </Card>
+      )}
+
+      {loading && !error && (
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-8">加载中...</p>
+        </Card>
+      )}
+
+      {!loading && !error && filtered.length === 0 && (
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-10">
+            {search || categoryFilter ? '没有匹配的自产件' : '暂无自产件'}
           </p>
-        )}
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {pagedProducts.map((product) => {
-            const imageUrl = resolveImageUrl(product.image);
-            const isLowStock = Number(product.stock_quantity) <= Number(product.min_stock || 0);
-            return (
-              <div key={product.id} className="flex flex-col rounded-2xl border border-slate-200 bg-slate-50 shadow-inner">
-                <div className="relative h-48 overflow-hidden rounded-t-2xl bg-slate-200">
-                  {imageUrl ? (
-                    <img src={imageUrl} alt={product.model_name} className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200 text-center text-sm text-slate-500">
-                      <span className="font-semibold">{product.model_name}</span>
-                      <span className="text-xs">{product.internal_code}</span>
-                    </div>
-                  )}
-                </div>
-                <div className="flex flex-1 flex-col gap-3 p-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-slate-400">型号</p>
-                    <p className="text-lg font-semibold text-slate-900">{product.model_name}</p>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 text-sm text-slate-600">
-                    <div>
-                      <p className="text-xs text-slate-400">编号</p>
-                      <p className="font-mono text-slate-800">{product.internal_code}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-400">单位</p>
-                      <p>{product.unit || '个'}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-400">库存</p>
-                      <p className={`text-base font-semibold ${isLowStock ? 'text-rose-600' : 'text-emerald-600'}`}>
-                        {Number(product.stock_quantity).toLocaleString()}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-400">安全库存</p>
-                      <p>{Number(product.min_stock || 0).toLocaleString()}</p>
-                    </div>
-                  </div>
-                  <div className="mt-auto flex gap-2 text-sm">
-                    <button
-                      type="button"
-                      className="flex-1 rounded-full border border-slate-200 px-3 py-2 text-slate-600 hover:bg-slate-100"
-                      onClick={() => handleOpenAdjust(product, 'OUT')}
-                    >
-                      出库
-                    </button>
-                    <button
-                      type="button"
-                      className="flex-1 rounded-full bg-slate-900 px-3 py-2 text-white hover:bg-slate-800"
-                      onClick={() => handleOpenAdjust(product, 'IN')}
-                    >
-                      入库
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <div className="mt-6">
-          <Pagination
-            page={currentPage}
-            pageSize={PAGE_SIZE}
-            total={filtered.length}
-            onPageChange={setPage}
-          />
-        </div>
-      </section>
+        </Card>
+      )}
 
-      <Modal title={adjustMode === 'IN' ? '入库调整' : '出库调整'} open={Boolean(adjustProduct)} onClose={() => setAdjustProduct(null)}>
-        {adjustProduct && (
-          <form
-            className="space-y-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              handleSubmitAdjust();
-            }}
-          >
-            <div>
-              <p className="text-sm text-slate-500">当前调整产品</p>
-              <p className="text-lg font-semibold text-slate-900">{adjustProduct.model_name}</p>
-              <p className="text-xs text-slate-500">{adjustProduct.internal_code}</p>
-            </div>
-            {/* 不可逆提醒 —— append-only 事件，需要冲销时新加一笔反向调整。 */}
-            <div className="rounded-xl border border-rose-200 bg-rose-50/60 px-3 py-2 text-xs text-rose-900 leading-relaxed">
-              <span className="font-bold">⚠ 提交后无法修改/删除</span>
-              ：每次出入库都会立即改变库存数字，录错请新加一笔反向调整冲销。
-            </div>
-            <label className="block text-sm text-slate-600">
-              <span className="mb-1 block">数量</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                value={adjustQty}
-                onChange={(event) => setAdjustQty(event.target.value)}
-                required
+      {!loading && !error && filtered.length > 0 && (
+        <>
+          <p className="text-micro text-ink-faint">
+            共 {filtered.length} 件 · 第 {currentPage} / {totalPages} 页
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {pagedProducts.map((product) => (
+              <GalleryCard
+                key={product.id}
+                product={product}
+                imageUrl={resolveImageUrl(product.image)}
+                onAdjust={() => setAdjustProduct(product)}
               />
-            </label>
-            <label className="block text-sm text-slate-600">
-              <span className="mb-1 block">备注（可选）</span>
-              <textarea
-                className="w-full rounded-xl border border-slate-200 px-3 py-2"
-                rows={2}
-                value={adjustNote}
-                onChange={(event) => setAdjustNote(event.target.value)}
-                placeholder="记录仓库、原因等信息"
-              />
-            </label>
-            {adjustError && <p className="text-sm text-rose-600">{adjustError}</p>}
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600"
-                onClick={() => setAdjustProduct(null)}
-                disabled={adjustSaving}
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                disabled={adjustSaving}
-              >
-                {adjustSaving ? '提交中…' : '确认调整'}
-              </button>
-            </div>
-          </form>
-        )}
-      </Modal>
+            ))}
+          </div>
+          <Pagination page={currentPage} total={filtered.length} onPageChange={setPage} />
+        </>
+      )}
 
-      <Modal title="新建自产件" open={showProductModal} onClose={() => setShowProductModal(false)}>
+      {/* 单件调整 Modal —— 复用 InventoryPanel 同款 */}
+      <SingleAdjustModal
+        open={Boolean(adjustProduct)}
+        product={adjustProduct ? toAdjustable(adjustProduct) : null}
+        onClose={() => setAdjustProduct(null)}
+        onSuccess={() => {
+          setAdjustProduct(null);
+          onRefresh();
+        }}
+        title="调整自产件库存"
+      />
+
+      {/* 多件批量 Modal —— 复用 InventoryPanel 同款 */}
+      <BatchAdjustModal
+        open={batchOpen}
+        products={adjustablePool}
+        onClose={() => setBatchOpen(false)}
+        onSuccess={() => {
+          setBatchOpen(false);
+          onRefresh();
+        }}
+        title="多件自产件批量出入"
+        pickerPlaceholderPrefix="继续添加自产件"
+      />
+
+      {/* 新建产品 Modal */}
+      <Modal
+        title="新建自产件"
+        open={showProductModal}
+        onClose={() => setShowProductModal(false)}
+        maxWidth="max-w-lg"
+      >
         <ProductForm
           categories={selfMadeCategories.length ? selfMadeCategories : categories}
-          defaultCategoryId={selfMadeCategories[0]?.id ?? categoryOptions[0]?.value}
+          defaultCategoryId={selfMadeCategories[0]?.id}
           onSuccess={() => {
             setShowProductModal(false);
             onRefresh();
@@ -346,5 +290,94 @@ export default function SelfMadeGalleryPanel({
         />
       </Modal>
     </div>
+  );
+}
+
+// ============================================================================
+// 图卡
+// ============================================================================
+
+interface GalleryCardProps {
+  product: ProductResponse;
+  imageUrl: string | null;
+  onAdjust: () => void;
+}
+
+function GalleryCard({ product, imageUrl, onAdjust }: GalleryCardProps) {
+  const stock = Number(product.stock_quantity);
+  const minStock = Number(product.min_stock || 0);
+  const isLowStock = stock <= minStock;
+  const categoryName = product.category_detail?.name;
+
+  return (
+    <Card padding="none" interactive className="flex flex-col overflow-hidden">
+      {/* 图位 */}
+      <div className="relative aspect-[4/3] bg-surface-muted overflow-hidden">
+        {imageUrl ? (
+          <img
+            src={imageUrl}
+            alt={product.model_name}
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-surface-muted to-surface-subtle text-ink-faint text-center px-3">
+            <span className="text-caption font-bold text-ink-body">{product.model_name}</span>
+            <span className="text-micro font-mono mt-1">{product.internal_code}</span>
+          </div>
+        )}
+        {categoryName && (
+          <div className="absolute top-2 left-2">
+            <Pill tone="muted" outline>
+              {categoryName}
+            </Pill>
+          </div>
+        )}
+        {isLowStock && (
+          <div className="absolute top-2 right-2">
+            <Pill tone="danger">低于安全</Pill>
+          </div>
+        )}
+      </div>
+
+      {/* 信息 + 操作 */}
+      <div className="flex flex-col gap-3 p-4 flex-1">
+        <div>
+          <p className="text-body font-bold text-ink truncate" title={product.model_name}>
+            {product.model_name}
+          </p>
+          <p className="text-micro font-mono text-ink-faint mt-0.5">{product.internal_code}</p>
+        </div>
+
+        {/* 库存数字 */}
+        <div className="flex items-end justify-between gap-2">
+          <div>
+            <p className="text-micro text-ink-faint uppercase">库存</p>
+            <p
+              className={`text-heading font-mono font-bold leading-none ${
+                isLowStock ? 'text-danger' : 'text-ink'
+              }`}
+            >
+              {stock.toLocaleString()}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-micro text-ink-faint uppercase">安全</p>
+            <p className="text-caption font-mono text-ink-muted">
+              {minStock.toLocaleString()} {product.unit || '个'}
+            </p>
+          </div>
+        </div>
+
+        {/* 操作按钮 */}
+        <button
+          onClick={onAdjust}
+          className="mt-auto w-full rounded-pill border border-line-strong text-ink-body py-1.5 text-caption font-bold
+                     hover:bg-primary hover:text-on-primary hover:border-primary transition-all"
+        >
+          调整库存
+        </button>
+      </div>
+    </Card>
   );
 }

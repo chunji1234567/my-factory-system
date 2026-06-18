@@ -12,7 +12,7 @@ from .views import (
     FinancePartnerDetailView,
     FinancePartnerLedgerExportView,
     CustomerPreferredProductViewSet,
-    ProductionOrderViewSet,
+    ProductionRecordViewSet,
 )
 
 router = DefaultRouter()
@@ -22,7 +22,7 @@ router.register(r'customer-preferred-products', CustomerPreferredProductViewSet,
 router.register(r'stock-adjustments', StockAdjustmentViewSet, basename='stock-adjustment')
 router.register(r'receiving-logs', ReceivingLogViewSet, basename='receiving-log')
 router.register(r'shipping-logs', ShippingLogViewSet, basename='shipping-log')
-router.register(r'production-orders', ProductionOrderViewSet, basename='production-order')
+router.register(r'production-records', ProductionRecordViewSet, basename='production-record')
 router.register(r'finance/transactions', FinancialTransactionViewSet, basename='finance-transaction')
 
 urlpatterns = [

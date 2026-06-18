@@ -25,8 +25,7 @@ from business.models import (
     FinancialTransaction,
     CustomerPreferredProduct,
     PartnerLedgerEntry,
-    ProductionOrder,
-    ProductionOrderLine,
+    ProductionRecord,
 )
 from .serializers import (
     PurchaseOrderSerializer,
@@ -37,11 +36,12 @@ from .serializers import (
     CustomerPreferredProductSerializer,
     OrderEventSerializer,
     PurchaseOrderEventSerializer,
-    ProductionOrderSerializer,
+    ProductionRecordSerializer,
 )
 from .permissions import (
     ManagerOrWarehouseReadOnly,
     ManagerOrShipperReadOnly,
+    ManagerOrFulfillmentReadOnly,
     IsManagerOrWarehouse,
     IsManagerOrShipper,
     IsManager,
@@ -53,7 +53,7 @@ from .filters import (
     ShippingLogFilter,
     StockAdjustmentFilter,
     FinancialTransactionFilter,
-    ProductionOrderFilter,
+    ProductionRecordFilter,
 )
 from .finance_serializers import (
     FinancePartnerSummarySerializer,
@@ -69,6 +69,23 @@ class CSVRenderer(renderers.BaseRenderer):
     charset = 'utf-8'
 
     def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class PDFRenderer(renderers.BaseRenderer):
+    """让 DRF 内容协商承认 application/pdf。
+
+    没有这个 renderer，前端发 `Accept: application/pdf` 会在 DRF 进入 view
+    之前直接被挡掉，返回 406 "Could not satisfy the request Accept header"。
+    用于发货单 PDF 导出（详见 ShippingLogViewSet.export_pdf）。
+    """
+    media_type = 'application/pdf'
+    format = 'pdf'
+    charset = None
+    render_style = 'binary'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        # data 已经是 bytes（PDF 二进制），直接返回。
         return data
 
 
@@ -139,7 +156,10 @@ class SalesOrderViewSet(mixins.ListModelMixin,
                         mixins.DestroyModelMixin,
                         viewsets.GenericViewSet):
     serializer_class = SalesOrderSerializer
-    permission_classes = [IsAuthenticated, ManagerOrShipperReadOnly]
+    # 权限调整 2026-06-18：warehouse 也需要 LIST 销售订单 —— ProductionPanel
+    # 内部把销售明细打平成排产候选行（详见 docs/PRD.md §4.5）。
+    # manager 仍然全权（创建 / 编辑 / 删 / 改 status）；warehouse + shipper 只读。
+    permission_classes = [IsAuthenticated, ManagerOrFulfillmentReadOnly]
     ordering = ['-created_at']
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_class = SalesOrderFilter
@@ -243,6 +263,48 @@ class ShippingLogViewSet(mixins.ListModelMixin,
     def get_queryset(self):
         return ShippingLog.objects.select_related('sales_item__order__partner', 'sales_item__product')
 
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='export-pdf',
+        # 必须挂 PDFRenderer，否则 DRF 内容协商会在进 view 前用 406 挡掉
+        # 前端发的 `Accept: application/pdf`（详见 PDFRenderer 注释）。
+        renderer_classes=[PDFRenderer],
+    )
+    def export_pdf(self, request):
+        """把一组 ShippingLog 导出成发货单 PDF（详见 shipping_note_pdf.py）。
+
+        查询参数：``log_ids=1,2,3`` —— 按 id 过滤；同客户的多笔会被合并成
+        同一页发货单，不同客户分页。
+
+        返回 ``application/pdf``，文件名 ``shipping_notes_{YYYYMMDD}.pdf``。
+        """
+        from datetime import date as _date
+        from django.http import JsonResponse
+        from .shipping_note_pdf import generate_shipping_note_pdf
+
+        # 注意：错误响应必须用 JsonResponse 而不是 DRF Response——
+        # 这个 action 的 renderer_classes 只有 PDFRenderer（DRF 内容协商需要），
+        # Response 会被 PDFRenderer 把错误 dict 当二进制 PDF 输出，前端拿到的
+        # 就是损坏的 PDF。JsonResponse 直接走 Django 旁路，绕开 DRF 渲染管线。
+        raw_ids = request.query_params.get('log_ids', '')
+        try:
+            ids = [int(s) for s in raw_ids.split(',') if s.strip()]
+        except ValueError:
+            return JsonResponse({'detail': '无效的 log_ids 参数'}, status=400)
+        if not ids:
+            return JsonResponse({'detail': '请提供至少一个 log_ids'}, status=400)
+
+        logs = list(self.get_queryset().filter(id__in=ids))
+        if not logs:
+            return JsonResponse({'detail': '没有找到对应的发货流水'}, status=404)
+
+        pdf_bytes = generate_shipping_note_pdf(logs)
+        filename = f'shipping_notes_{_date.today().strftime("%Y%m%d")}.pdf'
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
 
 class StockAdjustmentViewSet(mixins.ListModelMixin,
                              mixins.RetrieveModelMixin,  # 让 detail GET 可用 → PATCH/PUT/DELETE 落 405
@@ -263,75 +325,43 @@ class StockAdjustmentViewSet(mixins.ListModelMixin,
         return StockAdjustment.objects.select_related('product')
 
 
-class ProductionOrderViewSet(mixins.ListModelMixin,
-                             mixins.RetrieveModelMixin,
-                             mixins.CreateModelMixin,
-                             mixins.UpdateModelMixin,
-                             viewsets.GenericViewSet):
-    """排产单 ViewSet。
+class ProductionRecordViewSet(mixins.ListModelMixin,
+                              mixins.RetrieveModelMixin,
+                              mixins.CreateModelMixin,
+                              viewsets.GenericViewSet):
+    """排产记录 ViewSet（BOM-2.1，2026-05-27）。
 
-    权限：所有 3 个角色（manager / warehouse / shipper）均可排产，
-    与业务侧确认（2026-05-11，详见 docs/PRD.md §2.2）。
+    权限：所有 3 个角色（manager / warehouse / shipper）均可排产。
 
     操作：
-    - GET / POST / PATCH 标准 CRUD（PATCH 仅在 PLANNED 状态下生效）
-    - ``@action execute``：把状态切到 EXECUTED 触发扣料 signal（不可逆）
-    - ``@action cancel``：从 PLANNED 取消到 CANCELLED
-    - 故意**不挂** DELETE / Destroy mixin——排产单是 append-only 的事件型
-      数据，不能删（只能 cancel 或留作历史）。
+    - GET（list/retrieve）+ POST（create）；**没有** PATCH / DELETE
+    - 创建即扣料：signal ``auto_consume_on_production_record_create`` 在
+      ``post_save(created=True)`` 时写 (2 + N) 条 StockAdjustment(PRODUCE_CONSUME)
+    - 首条记录创建时另一信号 ``auto_promote_to_producing`` 把销售单
+      ORDERED → PRODUCING
 
-    扣料逻辑在 ``business/signals.py: execute_production_consumption``，
-    一旦 EXECUTED，本 ViewSet 拒绝任何编辑。
+    append-only：要"撤销"必须录反向 ``StockAdjustment(MANUAL_IN)``；
+    与 backend-rules.md §1.5 总则一致。
+
+    详见 docs/PRD.md §3.2 / §4.5 / §9.4 changelog 2026-05-27。
     """
-    serializer_class = ProductionOrderSerializer
+    serializer_class = ProductionRecordSerializer
     permission_classes = [IsAuthenticated]  # 三角色都可操作
-    ordering = ['-plan_date', '-created_at']
+    ordering = ['-executed_at']
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_class = ProductionOrderFilter
-    ordering_fields = ['plan_date', 'created_at', 'status']
+    filterset_class = ProductionRecordFilter
+    ordering_fields = ['executed_at', 'quantity']
 
     def get_queryset(self):
         return (
-            ProductionOrder.objects.all()
-            .prefetch_related(
-                'lines__shell', 'lines__cable',
-                'lines__pcb_plan__materials__material',
-                'lines__sales_item__order',
+            ProductionRecord.objects.all()
+            .select_related(
+                'sales_item__order__partner',
+                'sales_item__product',
+                'sales_item__cable',
+                'sales_item__pcb_plan',
             )
         )
-
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def execute(self, request, pk=None):
-        """把排产单从 PLANNED 切到 EXECUTED，触发扣料。
-
-        - 仅 PLANNED 状态可执行；其他状态返回 400
-        - 不传 body，纯动作
-        - 成功后返回最新订单（带新写入的 executed_at）
-        """
-        order = self.get_object()
-        if order.status != 'PLANNED':
-            return Response(
-                {'detail': f'排产单当前状态为 {order.get_status_display()}，不允许执行扣料'},
-                status=400,
-            )
-        order.status = 'EXECUTED'
-        order.save(update_fields=['status'])
-        # execute_production_consumption signal 会自动写 StockAdjustment 并设 executed_at
-        order.refresh_from_db()
-        return Response(self.get_serializer(order).data)
-
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def cancel(self, request, pk=None):
-        """取消排产单（仅 PLANNED 可取消）。"""
-        order = self.get_object()
-        if order.status != 'PLANNED':
-            return Response(
-                {'detail': f'排产单当前状态为 {order.get_status_display()}，不允许取消'},
-                status=400,
-            )
-        order.status = 'CANCELLED'
-        order.save(update_fields=['status'])
-        return Response(self.get_serializer(order).data)
 
 
 class FinancialTransactionViewSet(mixins.ListModelMixin,

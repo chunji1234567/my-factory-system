@@ -1,10 +1,11 @@
 // src/components/common/OrderItemsEditor.tsx
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { BaseInput } from './BaseInput';
+import { Card, ActionBar, SearchableSelect } from '../primitives';
 import type { PcbPlanResponse } from '../../hooks/usePcbPlans';
 
 /**
- * 订单明细编辑器的 draft 模型。
+ * 订单明细编辑器（Stage C-3，2026-06-18 重做）。
  *
  * **采购模式**（mode='purchase'）：`category` + `product` 两级联动选任意物料。
  * `pcbPlan` / `cable` 字段无意义。
@@ -14,6 +15,15 @@ import type { PcbPlanResponse } from '../../hooks/usePcbPlans';
  *   - `pcbPlan`（PCB 方案，PcbPlan.id）—— 排产时按方案展开扣减原材料
  *   - `cable`（线材，CABLE）
  * `category` 字段无意义。详见 docs/PRD.md §3.2 §4.5。
+ *
+ * UX 改版要点（详见 docs/ux-audit.md §2.3 #3）：
+ *   - 每条明细 = Card tone="subtle"，不再用自造 rounded-3xl 卡
+ *   - 销售模式：三件 grid-cols-3 横排；客户产品名+备注 grid-cols-3；
+ *     价格/数量 grid-cols-2 在底部 border-t 分隔
+ *   - 顶部 ActionBar：「+ 复用上一条」（仅当已有明细时）+「+ 添加空白明细」
+ *     用户原话："这次提交保留之前的三件可以提高被涵盖率"
+ *   - 价格 label 加 "(可选)"——前端验证已不强校验，UI 显式说清
+ *   - 删除按钮常驻（不再依赖 hover）
  */
 export interface OrderItemDraft {
   id: number | null;
@@ -41,17 +51,16 @@ interface Props {
   preferredModelOptions?: string[]; // 销售单特有的客户偏好建议
 }
 
-const SLOT_LABELS = {
-  shell: '外壳（SELF_MADE）',
-  pcbPlan: 'PCB 方案',
-  cable: '线材（CABLE）',
-} as const;
-
 /** 销售槽位 → 物料分类类型映射（仅 shell / cable，pcbPlan 走方案表）。 */
 const SLOT_TO_CATEGORY: Record<'shell' | 'cable', string> = {
   shell: 'SELF_MADE',
   cable: 'CABLE',
 };
+
+const FIELD_LABEL_CLS = 'text-micro font-bold text-ink-faint uppercase tracking-wider ml-0.5';
+const SELECT_CLS =
+  'w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none ' +
+  'focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors';
 
 export const OrderItemsEditor = ({
   mode,
@@ -62,8 +71,45 @@ export const OrderItemsEditor = ({
   pcbPlans = [],
   preferredModelOptions = [],
 }: Props) => {
+  // --- 数据准备 ---
+  const purchaseProductOptions = useMemo(() => {
+    // 按 category id 索引：访问时直接 lookup
+    const byCat = new Map<string, { value: string; label: string }[]>();
+    for (const p of products) {
+      const cid = String(p.category_detail?.id ?? '');
+      if (!cid) continue;
+      const opt = { value: String(p.id), label: `${p.model_name} (${p.internal_code})` };
+      if (!byCat.has(cid)) byCat.set(cid, []);
+      byCat.get(cid)!.push(opt);
+    }
+    return byCat;
+  }, [products]);
 
-  // 逻辑抽离：处理字段变更
+  const salesSlotOptions = useMemo(() => {
+    // 销售模式 shell / cable 各按 category_type 过滤
+    const shellList: { value: string; label: string }[] = [];
+    const cableList: { value: string; label: string }[] = [];
+    for (const p of products) {
+      const type = p.category_detail?.category_type;
+      const opt = { value: String(p.id), label: `${p.model_name} (${p.internal_code})` };
+      if (type === SLOT_TO_CATEGORY.shell) shellList.push(opt);
+      if (type === SLOT_TO_CATEGORY.cable) cableList.push(opt);
+    }
+    return { shell: shellList, cable: cableList };
+  }, [products]);
+
+  const pcbPlanOptions = useMemo(
+    () =>
+      pcbPlans
+        .filter((p) => p.is_active)
+        .map((p) => ({
+          value: String(p.id),
+          label: p.code ? `${p.name} (${p.code})` : p.name,
+        })),
+    [pcbPlans],
+  );
+
+  // --- 业务动作 ---
   const updateItem = (index: number, field: keyof OrderItemDraft, value: string) => {
     const next = [...items];
     next[index] = { ...next[index], [field]: value };
@@ -74,97 +120,119 @@ export const OrderItemsEditor = ({
     onChange(next);
   };
 
-  const addItem = () => onChange([
-    ...items,
+  const blankItem = (): OrderItemDraft =>
     mode === 'sales'
-      ? { id: null, product: '', pcbPlan: '', cable: '', price: '', quantity: '', customName: '', detailDescription: '' }
-      : { id: null, category: '', product: '', price: '', quantity: '' },
-  ]);
+      ? {
+          id: null,
+          product: '',
+          pcbPlan: '',
+          cable: '',
+          price: '',
+          quantity: '',
+          customName: '',
+          detailDescription: '',
+        }
+      : { id: null, category: '', product: '', price: '', quantity: '' };
+
+  const addBlank = () => onChange([...items, blankItem()]);
+
+  /**
+   * 复用上一条的三件组合（销售）/ 分类+物料（采购）。
+   * 价格/数量/客户产品名/备注**清空**——这些是每条明细独立的业务参数。
+   * 复制三件本身就是 90% 场景：客户大订单常有几条规格几乎一样的明细。
+   */
+  const duplicateLast = () => {
+    if (!items.length) return;
+    const last = items[items.length - 1];
+    const next = blankItem();
+    if (mode === 'sales') {
+      next.product = last.product;
+      next.pcbPlan = last.pcbPlan;
+      next.cable = last.cable;
+    } else {
+      next.category = last.category;
+      next.product = last.product;
+    }
+    onChange([...items, next]);
+  };
+
   const removeItem = (index: number) => onChange(items.filter((_, i) => i !== index));
 
-  // 采购模式：按 category id 过滤
-  const getPurchaseProductOptions = (catId: string) => {
-    return products
-      .filter(p => String(p.category_detail?.id) === catId)
-      .map(p => ({ value: String(p.id), label: `${p.model_name} (${p.internal_code})` }));
-  };
-
-  // 销售模式产品槽（shell / cable）：按 category_type 过滤物料
-  const getProductSlotOptions = (slot: 'shell' | 'cable') => {
-    const targetType = SLOT_TO_CATEGORY[slot];
-    return products
-      .filter(p => p.category_detail?.category_type === targetType)
-      .map(p => ({ value: String(p.id), label: `${p.model_name} (${p.internal_code})` }));
-  };
-
-  // 销售模式 PCB 方案槽：从 props.pcbPlans 取启用方案
-  const pcbPlanOptions = useMemo(
-    () => pcbPlans
-      .filter(p => p.is_active)
-      .map(p => ({
-        value: String(p.id),
-        label: p.code ? `${p.name} (${p.code})` : p.name,
-      })),
-    [pcbPlans],
-  );
-
-  // 已选方案的展开预览：用于展示"扣减时会扣这些原材料"
-  const selectedPlanPreview = (planId: string | undefined) => {
-    if (!planId) return null;
-    const plan = pcbPlans.find(p => String(p.id) === planId);
-    if (!plan || !plan.materials.length) return null;
-    return plan.materials
-      .map(m => `${m.material_detail?.model_name ?? '原材料'} × ${m.quantity_per_unit}`)
-      .join('、');
-  };
-
+  // --- 渲染 ---
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h4 className="text-sm font-bold uppercase tracking-widest text-slate-400 ml-1">项目明细</h4>
-        <button
-          type="button"
-          onClick={addItem}
-          className="rounded-full border border-slate-200 px-4 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-all"
-        >
-          + 添加明细行
-        </button>
+    <div className="space-y-3">
+      {/* 顶部 ActionBar：复用 + 添加 */}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-caption text-ink-faint">
+          共 <span className="font-mono text-ink-body">{items.length}</span> 条明细
+        </p>
+        <ActionBar align="end">
+          {items.length > 0 && (
+            <ActionBar.GhostButton onClick={duplicateLast}>
+              + 复用上一条
+            </ActionBar.GhostButton>
+          )}
+          <ActionBar.GhostButton onClick={addBlank}>
+            + 添加明细
+          </ActionBar.GhostButton>
+        </ActionBar>
       </div>
 
-      <div className="space-y-4">
+      {/* 空状态 */}
+      {items.length === 0 && (
+        <Card flat tone="subtle" padding="normal">
+          <p className="text-center text-caption text-ink-faint py-6">
+            还没有明细，点右上方"+ 添加明细"开始
+          </p>
+        </Card>
+      )}
+
+      {/* 明细列表 */}
+      <div className="space-y-3">
         {items.map((item, index) => (
-          <div key={index} className="relative group animate-in fade-in slide-in-from-top-2 duration-300">
-            <div className="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm hover:shadow-md transition-all">
+          <Card key={index} tone="subtle" padding="normal">
+            {/* 顶部：序号 + 删除 */}
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-micro font-mono text-ink-faint">#{index + 1}</span>
+              <button
+                type="button"
+                onClick={() => removeItem(index)}
+                className="text-micro font-bold text-ink-faint hover:text-danger transition-colors px-2 py-1"
+              >
+                删除
+              </button>
+            </div>
 
-              {/* === 采购模式：分类 + 物料 两级联动 === */}
-              {mode === 'purchase' && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* === 采购模式：分类 + 物料 + 价格 + 数量 === */}
+            {mode === 'purchase' && (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">分类</span>
-                    <select
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
+                    <span className={FIELD_LABEL_CLS}>分类</span>
+                    {/* 切换分类会触发 updateItem 内部把同条明细的 product 重置（详见
+                        updateItem 里 `if (mode === 'purchase' && field === 'category')` 的分支），
+                        所以即便从 SearchableSelect 选了新分类，物料下拉里旧选项会自动清空。 */}
+                    <SearchableSelect
+                      options={categoryOptions}
                       value={item.category ?? ''}
-                      onChange={(e) => updateItem(index, 'category', e.target.value)}
-                    >
-                      <option value="">选择分类</option>
-                      {categoryOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                    </select>
+                      onChange={(v) => updateItem(index, 'category', v)}
+                      placeholder="请选择分类（可搜索）"
+                    />
                   </div>
-
                   <div className="space-y-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">物料 (系统)</span>
-                    <select
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
+                    <span className={FIELD_LABEL_CLS}>物料</span>
+                    <SearchableSelect
+                      options={purchaseProductOptions.get(item.category ?? '') ?? []}
                       value={item.product ?? ''}
-                      onChange={(e) => updateItem(index, 'product', e.target.value)}
-                    >
-                      <option value="">{item.category ? '请选择物料' : '先选分类'}</option>
-                      {getPurchaseProductOptions(item.category ?? '').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                    </select>
+                      onChange={(v) => updateItem(index, 'product', v)}
+                      disabled={!item.category}
+                      placeholder={item.category ? '请选择物料（可搜索）' : '先选分类'}
+                    />
                   </div>
-
+                </div>
+                <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-line">
                   <BaseInput
-                    label="单价"
+                    label="单价（可选）"
                     type="number"
                     value={item.price}
                     onChange={(e) => updateItem(index, 'price', e.target.value)}
@@ -176,123 +244,95 @@ export const OrderItemsEditor = ({
                     onChange={(e) => updateItem(index, 'quantity', e.target.value)}
                   />
                 </div>
-              )}
+              </>
+            )}
 
-              {/* === 销售模式：三件组合（外壳 + PCB 方案 + 线材）+ 价格/数量 === */}
-              {mode === 'sales' && (
-                <>
-                  {/* 外壳 + PCB 方案 + 线材 */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {/* 1. 外壳（SELF_MADE 半成品） */}
-                    <div className="space-y-1">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">
-                        {SLOT_LABELS.shell}
-                      </span>
-                      <select
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
-                        value={item.product ?? ''}
-                        onChange={(e) => updateItem(index, 'product', e.target.value)}
-                      >
-                        <option value="">请选择</option>
-                        {getProductSlotOptions('shell').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                      </select>
-                    </div>
-
-                    {/* 2. PCB 方案（BOM-2.0 起替换板材物料下拉） */}
-                    <div className="space-y-1">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">
-                        {SLOT_LABELS.pcbPlan}
-                      </span>
-                      <select
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
-                        value={item.pcbPlan ?? ''}
-                        onChange={(e) => updateItem(index, 'pcbPlan', e.target.value)}
-                      >
-                        <option value="">{pcbPlanOptions.length ? '请选择方案' : '尚无可用方案'}</option>
-                        {pcbPlanOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                      </select>
-                      {/* 展开预览：让用户看到本方案排产时会扣的原材料 */}
-                      {selectedPlanPreview(item.pcbPlan) && (
-                        <p className="text-[10px] text-slate-400 leading-relaxed mt-1">
-                          扣料：{selectedPlanPreview(item.pcbPlan)}
-                        </p>
-                      )}
-                    </div>
-
-                    {/* 3. 线材（CABLE 半成品） */}
-                    <div className="space-y-1">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">
-                        {SLOT_LABELS.cable}
-                      </span>
-                      <select
-                        className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
-                        value={item.cable ?? ''}
-                        onChange={(e) => updateItem(index, 'cable', e.target.value)}
-                      >
-                        <option value="">请选择</option>
-                        {getProductSlotOptions('cable').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* 价格 + 数量 */}
-                  <div className="grid grid-cols-2 gap-4 mt-4">
-                    <BaseInput
-                      label="单价"
-                      type="number"
-                      value={item.price}
-                      onChange={(e) => updateItem(index, 'price', e.target.value)}
-                    />
-                    <BaseInput
-                      label="数量（套）"
-                      type="number"
-                      value={item.quantity}
-                      onChange={(e) => updateItem(index, 'quantity', e.target.value)}
+            {/* === 销售模式：三件 + 客户产品名/备注 + 价格/数量 === */}
+            {mode === 'sales' && (
+              <>
+                {/* 三件：外壳 / PCB 方案 / 线材 */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <span className={FIELD_LABEL_CLS}>外壳</span>
+                    <SearchableSelect
+                      options={salesSlotOptions.shell}
+                      value={item.product ?? ''}
+                      onChange={(v) => updateItem(index, 'product', v)}
+                      placeholder="请选择外壳（可搜索）"
                     />
                   </div>
-
-                  {/* 销售单特有：客户产品名 + 细节描述 */}
-                  <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4 border-t border-slate-50 pt-4">
-                    <div className="lg:col-span-1">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">客户产品名称</span>
-                      <input
-                        list="preferred-models"
-                        className="w-full mt-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none"
-                        value={item.customName}
-                        placeholder="例如：Elite 黑色外壳套件"
-                        onChange={(e) => updateItem(index, 'customName', e.target.value)}
-                      />
-                    </div>
-                    <div className="lg:col-span-2">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase ml-1">细节描述</span>
-                      <textarea
-                        rows={1}
-                        className="w-full mt-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/5 outline-none resize-none"
-                        value={item.detailDescription}
-                        placeholder="记录规格、线长等定制信息..."
-                        onChange={(e) => updateItem(index, 'detailDescription', e.target.value)}
-                      />
-                    </div>
+                  <div className="space-y-1">
+                    <span className={FIELD_LABEL_CLS}>PCB 方案</span>
+                    <SearchableSelect
+                      options={pcbPlanOptions}
+                      value={item.pcbPlan ?? ''}
+                      onChange={(v) => updateItem(index, 'pcbPlan', v)}
+                      placeholder={pcbPlanOptions.length ? '请选择方案（可搜索）' : '尚无可用方案'}
+                      disabled={!pcbPlanOptions.length}
+                    />
                   </div>
-                </>
-              )}
+                  <div className="space-y-1">
+                    <span className={FIELD_LABEL_CLS}>线材</span>
+                    <SearchableSelect
+                      options={salesSlotOptions.cable}
+                      value={item.cable ?? ''}
+                      onChange={(v) => updateItem(index, 'cable', v)}
+                      placeholder="请选择线材（可搜索）"
+                    />
+                  </div>
+                </div>
 
-              {/* 悬浮删除按钮 (仅 PC 展示，移动端常驻) */}
-              <button
-                onClick={() => removeItem(index)}
-                className="absolute -right-2 -top-2 lg:opacity-0 lg:group-hover:opacity-100 bg-rose-500 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs shadow-lg transition-all hover:scale-110"
-              >
-                ×
-              </button>
-            </div>
-          </div>
+                {/* 客户产品名 + 备注（备注更宽） */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+                  <div className="space-y-1">
+                    <span className={FIELD_LABEL_CLS}>客户产品名</span>
+                    <input
+                      list="preferred-models"
+                      className={SELECT_CLS}
+                      value={item.customName ?? ''}
+                      placeholder="例：Elite 黑色外壳套件"
+                      onChange={(e) => updateItem(index, 'customName', e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1 md:col-span-2">
+                    <span className={FIELD_LABEL_CLS}>细节描述（商标 / 颜色 / 工艺）</span>
+                    <textarea
+                      rows={1}
+                      className={`${SELECT_CLS} resize-none`}
+                      value={item.detailDescription ?? ''}
+                      placeholder="记录规格、线长、印刷工艺等定制信息..."
+                      onChange={(e) => updateItem(index, 'detailDescription', e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* 价格 + 数量（底部分隔） */}
+                <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-line">
+                  <BaseInput
+                    label="单价（可选）"
+                    type="number"
+                    value={item.price}
+                    onChange={(e) => updateItem(index, 'price', e.target.value)}
+                  />
+                  <BaseInput
+                    label="数量（套）"
+                    type="number"
+                    value={item.quantity}
+                    onChange={(e) => updateItem(index, 'quantity', e.target.value)}
+                  />
+                </div>
+              </>
+            )}
+          </Card>
         ))}
       </div>
 
       {/* 销售单专用的数据建议列表 */}
       {mode === 'sales' && (
         <datalist id="preferred-models">
-          {preferredModelOptions.map(m => <option key={m} value={m} />)}
+          {preferredModelOptions.map((m) => (
+            <option key={m} value={m} />
+          ))}
         </datalist>
       )}
     </div>

@@ -49,7 +49,7 @@
 | `purchase-orders/` GET | ✓ | ✓ | ✗ | `ManagerOrWarehouseReadOnly` |
 | `purchase-orders/` 写 | ✓ | ✗ | ✗ | 同上 |
 | `purchase-orders/{id}/events/` GET/POST | ✓ | ✓ | ✗ | `IsManagerOrWarehouse` |
-| `sales-orders/` GET | ✓ | ✗ | ✓ | `ManagerOrShipperReadOnly` |
+| `sales-orders/` GET | ✓ | ✓ | ✓ | `ManagerOrFulfillmentReadOnly`（2026-06-18：warehouse 也能读，详见 §9.4） |
 | `sales-orders/` 写 | ✓ | ✗ | ✗ | 同上 |
 | `sales-orders/{id}/events/` GET/POST | ✓ | ✗ | ✓ | `IsManagerOrShipper` |
 | `sales-orders/{id}/status/` PATCH | ✓ | ✗ | ✓ | `IsManagerOrShipper` |
@@ -57,11 +57,11 @@
 | `customer-preferred-products/` POST/DELETE | ✓ | ✗ | ✗ | 同上 |
 | `receiving-logs/` GET/POST | ✓ | ✓ | ✗ | `IsManagerOrWarehouse` |
 | `shipping-logs/` GET/POST | ✓ | ✗ | ✓ | `IsManagerOrShipper` |
+| `shipping-logs/export-pdf/?log_ids=` GET | ✓ | ✗ | ✓ | `IsManagerOrShipper`，返回 `application/pdf`（详见 §4.6） |
 | `stock-adjustments/` GET/POST | ✓ | ✓ | ✗ | `IsManagerOrWarehouse` |
 | `stock-adjustments/{id}/` GET | ✓ | ✓ | ✗ | `IsManagerOrWarehouse`（无 PATCH/PUT/DELETE，append-only） |
-| `production-orders/` GET/POST/PATCH | ✓ | ✓ | ✓ | `IsAuthenticated`（三角色都可排产） |
-| `production-orders/{id}/execute/` POST | ✓ | ✓ | ✓ | 同上；触发扣料，不可逆 |
-| `production-orders/{id}/cancel/` POST | ✓ | ✓ | ✓ | 同上；仅 PLANNED 可取消 |
+| `production-records/` GET/POST | ✓ | ✓ | ✓ | `IsAuthenticated`（三角色都可排产）。POST 创建即扣料，不可逆 |
+| `production-records/{id}/` GET | ✓ | ✓ | ✓ | append-only：无 PATCH / DELETE |
 | `finance/transactions/` 全部 | ✓ | ✗ | ✗ | `IsManager` |
 | `finance/partners/` 全部 | ✓ | ✗ | ✗ | `IsManager` |
 | `finance/partners/{id}/` 全部 | ✓ | ✗ | ✗ | `IsManager` |
@@ -130,13 +130,19 @@
 
 #### SalesOrder（销售单）
 - `status`：`ORDERED` → `PRODUCING` → `SHIPPED` → `COMPLETED`（前端建模为单向阶段流）
-- `order_no`：缺省时由 `SalesOrderSerializer._generate_order_no` 生成，格式 `SO{year}-{NNNN}`；与采购单共享 helper `_generate_sequential_order_no`，在 `transaction.atomic()` + `select_for_update` 下取最大尾号 +1，规避并发碰撞与"删除中间单后撞号"的问题
+- `order_no`：缺省时由 `SalesOrderSerializer._generate_order_no` 生成，**2026-06-18 起格式 `SO-yyyymmdd-NNN`**（按日重置 3 位序号）。旧格式 `SO{year}-{NNNN}` 的历史数据保留不变；新旧 prefix `SO-` vs `SO` 不前缀相交，select_for_update 不冲突。与采购单共享 helper `_generate_sequential_order_no`，事务内取最大尾号 +1
 - `partner`：`on_delete=CASCADE`，删除合作方会级联清掉订单
-- `total_amount`：由 `sync_sales_order_ledger` 信号在 `SalesOrderItem` 写入时自动重算（同时维护该订单的唯一 SALES 台账条目）
+- `total_amount`：由 `sync_sales_order_ledger` 信号在 `SalesOrderItem` 写入时自动重算（同时维护该订单的唯一 SALES 台账条目）。**2026-06-18 起 serializer 层 read-only**，客户端 PATCH 时 DRF 静默丢弃，防止与 ledger 不一致（详见 §9.4 财务加固）
+- `expected_delivery_date`（**2026-06-18 新增**）：DateField，可空。答应客户的交付日期；前端排产 / 发货卡片右上角 `DueDatePill` 由此字段派生紧迫度
 - ~~`paid_amount`~~：**已废弃并从模型中删除**（见 migration 0013）。应收金额改由 `Partner.balance`（property）= 该合作方所有 `PartnerLedgerEntry.amount` 之和，单据级别的"已结清"概念不再保留
 - `operator`：缺省时取 `request.user.get_full_name() or username`
 
 #### SalesOrderItem
+BOM-2.1（2026-05-27）新增三个派生量（property + serializer 输出）：
+- `shipped_quantity` = Σ `ShippingLog.quantity_shipped`
+- `produced_quantity` = Σ `ProductionRecord.quantity`
+- `available_to_ship_quantity` = `max(0, min(quantity, produced) - shipped)`
+
 - BOM-2.0 改造后（2026-05-21），一条明细 = 一套"成品 SKU"，由三件组成：
   - `product`：外壳半成品槽位（沿用历史字段名），FK `Product` 限定 `category_type=SELF_MADE`
   - `pcb_plan`：PCB 方案槽位（**BOM-2.0 起替换 board 字段**），FK `PcbPlan` 限定 `is_active=True`
@@ -159,9 +165,10 @@
 
 #### PurchaseOrder（采购单）
 - `status`：`ORDERED` → `PARTIAL` → `RECEIVED`
-- `order_no` 缺省格式 `PO{year}-{NNNN}`，与销售单共用 helper `_generate_sequential_order_no`，`select_for_update` + 取最大尾号 +1
+- `order_no` 缺省格式：**2026-06-18 起 `PO-yyyymmdd-NNN`**（与销售单同改造，旧格式 `PO{year}-{NNNN}` 历史数据保留），与销售单共用 helper `_generate_sequential_order_no`
 - `partner`：`on_delete=CASCADE`
-- `total_amount`：信号 `sync_purchase_order_ledger` 自动重算（同时维护该订单的唯一 PURCHASE 台账条目）
+- `total_amount`：信号 `sync_purchase_order_ledger` 自动重算（同时维护该订单的唯一 PURCHASE 台账条目）。**2026-06-18 起 serializer 层 read-only**，同 SalesOrder
+- `expected_arrival_date`（**2026-06-18 新增**）：DateField，可空。供应商承诺到货日期；前端收货中心订单卡右上角 `DueDatePill` 由此派生。命名与 `expected_delivery_date` 区分——这里是货到本仓，不是送达客户
 - ~~`paid_amount`~~：**已废弃并从模型中删除**（见 migration 0013），应付金额改由 `Partner.balance`（property）= 合作方台账之和
 
 #### PurchaseOrderItem
@@ -225,7 +232,22 @@
 - **append-only**：EXECUTED 之后 admin 整单只读，DRF ViewSet **不挂 DestroyMixin**，错了请录反向 `StockAdjustment(MANUAL_IN)`
 - 三角色均可操作（manager / warehouse / shipper），与业务侧确认
 
-#### ProductionOrderLine（排产明细，BOM-2.0）
+#### ~~ProductionOrder / ProductionOrderLine~~（已删除，BOM-2.1 起）
+BOM-2.0 的两段式（PLANNED → EXECUTED）排产单概念彻底取消，被 `ProductionRecord` 替代。详见 §9.4 changelog 2026-05-27。
+
+#### ProductionRecord（排产记录，BOM-2.1 起）
+- 一条 = 给某条销售明细记一笔产量事件，**append-only**
+- `sales_item`：FK `SalesOrderItem`，**CASCADE + 必填**（不允许备货模式）
+- `quantity`：本次产量
+- `skip_consumption`：默认 False，仅 admin 后台对"跨订单挪用已生产成品"等边缘场景使用（详见 §9.3）
+- `operator`：操作员
+- `note`：备注（可空）
+- `executed_at`：自动填，无 PLANNED 状态
+- 创建即扣料：信号 `auto_consume_on_production_record_create` 写 (2 + N) 条 `StockAdjustment(PRODUCE_CONSUME)`——shell/cable 各 1 条 + pcb_plan.materials 展开 N 条，全部从 `sales_item` 读
+- 创建即推状态：信号 `auto_promote_to_producing` 把 `SalesOrder.status` ORDERED → PRODUCING（状态机首次有自动驱动）
+- 不可编辑/删除——错了用反向 `StockAdjustment(MANUAL_IN)`
+
+#### ~~（历史保留，便于 grep）ProductionOrderLine~~（BOM-2.0，已删除）
 - 一条 = 做多少套（1 套 = 1 外壳 + 1 PCB 方案展开的原材料 + 1 线材）
 - `sales_item`（可空 FK，`SET_NULL`）：可关联到某条 `SalesOrderItem`，也可空（备货性生产）
 - `shell`：FK `Product` 限定 `category_type=SELF_MADE`，**PROTECT**
@@ -313,8 +335,41 @@ PurchaseOrder (1) ──── (N) PurchaseOrderEvent
 4. manager 用 `/finance/partners/?type=receivable|payable` 看汇总；用 `/finance/partners/{id}/?type=...` 看详情；用 `/finance/partners/{id}/ledger-export/` 拉 CSV
 5. 销售单 / 采购单 / 流水 在台账中用统一的 (debit_amount, credit_amount, amount) 三元组呈现，导出 CSV 时也按同一格式
 6. 汇总接口字段名 `balance`（2026-05-21 起；之前叫 `outstanding_amount`）直接来源于 `Partner.balance`。详情接口只返回 `balance`，旧兼容字段 `outstanding_amount` 已移除——见 §9.4 changelog 2026-05-21 §9.2 #14。
+7. **2026-06-18 加固**（详见 §9.4）：
+   - **`total_amount` 序列化器 read-only**：客户端不能 PATCH 覆盖订单总额，防止与 ledger 不一致
+   - **partner 切换守卫**：`SalesOrderSerializer.update` / `PurchaseOrderSerializer.update` 检测 `partner_id` 变化时强制触发一次 ledger 同步（保存任意一条 item 让 signal 接管），防止只 PATCH partner 不带 items_payload 时 ledger entry 还挂在旧 partner 下
+   - 测试覆盖：`FinanceGuardrailsTest`（4 个 test cases）
 
-### 4.5 BOM 排产与自动扣料（BOM-2.0）
+### 4.5 BOM 排产与自动扣料（BOM-2.1，2026-05-27 重设计）
+
+> **重设计要点**：排产单据制（ProductionOrder + Line + PLANNED/EXECUTED 两段式）
+> 被彻底废除，替换为单条 `ProductionRecord` 事件（创建即扣料 + append-only）。
+> 与 `ShippingLog` 完全对称。详见 §3.2 ProductionRecord 与 §9.4 changelog 2026-05-27。
+
+完整流程（BOM-2.1）：
+
+1. **维护方案表**（manager）：同前，在 PCB 方案面板创建/编辑 `PcbPlan`
+2. **录入物料库存**（warehouse）：同前，外壳/线材半成品 + 原材料都通过
+   `StockAdjustment(MANUAL_IN)` 录入
+3. **创建销售单**（manager）：每条明细挂三件（外壳 + PCB 方案 + 线材）；只记账不扣料
+4. **每天排产**（三角色任一）：在排产中心**以销售明细为主视角**的列表里，输入
+   "今天给这条明细做几套" + 点排产按钮 → `POST /production-records/`：
+   - 校验：`produced + new ≤ sales_item.quantity`（**过排产禁止**）
+   - 创建 `ProductionRecord`，信号 `auto_consume_on_production_record_create` 立即写
+     (2 + N) 条 `StockAdjustment(PRODUCE_CONSUME)`——shell/cable/plan.materials
+     从 `sales_item` 读，不在 ProductionRecord 上独立存储
+   - 信号 `auto_promote_to_producing` 检查：若当前 SalesOrder.status==ORDERED 则推 PRODUCING
+5. **发货**（shipper / manager）：在发货中心查看每条明细的"已生产 / 已发 / 总量 / 可发"
+   四元组，下拉只显示 `available_to_ship_quantity > 0` 的明细。`POST /shipping-logs/`：
+   - 校验：`quantity_shipped ≤ max(0, min(quantity, produced) - shipped)`
+   - 创建 ShippingLog，信号 `auto_complete_sales_order` 检查全单是否发完 → 推 SHIPPED/COMPLETED
+6. **撤销已扣料**（不允许）：录反向 `StockAdjustment(MANUAL_IN)` 把料退回
+7. **跨订单挪用幽灵库存**（边缘场景）：admin 后台手动创建
+   `ProductionRecord(skip_consumption=True)` 把多余成品"挂到"另一个销售明细下，详见 §9.3
+
+---
+
+### 4.5.legacy ~~BOM-2.0 排产流程~~（已废弃，仅作历史参考）
 
 > BOM-2.0（2026-05-21）核心：销售明细 = 外壳半成品 + PCB 方案 + 线材半成品三件组合。
 > **方案 = 一种 PCB 板的物料配方**，由外包加工商按方案领料贴片送回。
@@ -346,6 +401,20 @@ PurchaseOrder (1) ──── (N) PurchaseOrderEvent
 7. **取消**：仅 `PLANNED` 状态可调 `POST /production-orders/{id}/cancel/`，状态切到 `CANCELLED`，不触发任何库存动作
 
 **业务侧约定**（外包加工商）：几乎不存在丢料/废料（拿 N 件料回 N 块板），所以系统不专门跟踪"加工商领料"与"板子回收"两个时间点；如有损耗通过事后 `StockAdjustment` 调整。
+
+### 4.6 发货单 PDF 导出（2026-06-18 新增）
+
+外发凭证：司机带货送到客户处签收用；销售单据已经线上，纸只承担"客户/司机各留一联签字物证"角色。
+
+- **触发**：前端 ShippingPanel 的"历史流水" tab 勾选 N 条 ShippingLog → 「下载 N 条发货单 PDF」按钮 → 后端 `GET /shipping-logs/export-pdf/?log_ids=1,2,3`
+- **后端实现**：`backend/business/api/shipping_note_pdf.py`，用 ReportLab 渲染 A4
+- **字体**：自动发现链——macOS `PingFang.ttc` / `STHeiti Light.ttc` → Linux `Noto Sans CJK` → Windows `msyh.ttc` / `simhei.ttf` → repo bundled TTF → CID `STSong-Light` 兜底。真 TTF glyph 数据嵌入 PDF，跨阅读器（Chrome / Adobe / WPS / iOS Preview）稳定
+- **布局**：**2 客户/A4**——上下半页各一张发货单，中间画虚线 + "✂ 沿虚线裁剪" 提示。每张用 `KeepTogether` 锁定不跨页
+- **内容**：公司抬头（`settings.SHIPPING_NOTE_COMPANY_NAME` 配置，默认"天长市地久家用电器有限公司"）+ 客户名 + 日期 + 明细表（合同号 / 型号 / 规格备注 / 数量 / 单位 / 运单号 + 合计行）+ 签字栏（客户签收 / 司机 / 签收日期）
+- **分组**：按 `partner_id` 分组——同客户的多条 ShippingLog 合并到同一张发货单；不同客户分页
+- **错误响应**：`renderer_classes=[PDFRenderer]` 时 DRF 内容协商只认 application/pdf；错误用 `JsonResponse` 旁路绕开 DRF 渲染管线（详见 views.py.export_pdf 注释）
+
+历史：v1（2026-06-18 上午）曾用 ReportLab 内置 CID 字体 STSong-Light + 1 客户/页布局，因乱码 + 文字重叠 + 浪费纸被 v2 重写。早期 HTML print（window.print）路径已废，对应 `index.css @media print` 已清理。详见 §9.4 changelog。
 
 ---
 
@@ -388,11 +457,9 @@ PurchaseOrder (1) ──── (N) PurchaseOrderEvent
 | `customer-preferred-products/` | LIST/CREATE/DELETE | `partner=<id>`、`search=<name>` |
 | `receiving-logs/` | LIST/CREATE | `purchase_order`、`operator`（icontains）、`received_from/to`、`ordering` |
 | `shipping-logs/` | LIST/CREATE | `sales_order`、`partner`、`partner_name`、`operator`、`shipped_from/to`、`ordering` |
+| `shipping-logs/export-pdf/` | GET | `log_ids=1,2,3`（必填）；返回 `application/pdf`，按客户分组、2 张/A4 布局。详见 §4.6 |
 | `stock-adjustments/` | LIST/CREATE/RETRIEVE | `product`、`adjustment_type`、`operator`、`note`、`created_from/to`、`ordering`；**PATCH/PUT/DELETE = 405** |
-| `production-orders/` | LIST/CREATE | `status`、`plan_date`、`plan_date_from/to`、`order_no`、`ordering`、`page` |
-| `production-orders/{id}/` | GET/PATCH | PATCH 仅在 `PLANNED` 状态有效；EXECUTED/CANCELLED 后 400 拒绝 |
-| `production-orders/{id}/execute/` | POST | 触发扣料：PLANNED → EXECUTED；signal 自动写 3N 条 PRODUCE_CONSUME |
-| `production-orders/{id}/cancel/` | POST | 仅 PLANNED → CANCELLED |
+| `production-records/` | LIST/CREATE/RETRIEVE | `sales_item`、`sales_order`、`partner`、`executed_from/to`、`operator`、`ordering`、`page`。POST **创建即扣料**（不可逆），过排产被拒；无 PATCH/DELETE |
 | `finance/transactions/` | LIST/CREATE/UPDATE/DESTROY | `partner`、`transaction_type`、`note`、`created_from/to`、`ordering` |
 | `finance/partners/` | GET | `type=receivable\|payable`（默认 receivable）、`search`、`created_from/to`、`ordering`（默认 `-balance`，接受 `outstanding/-outstanding` 兼容别名）；分页响应包含 `total_balance` |
 | `finance/partners/{id}/` | GET | 同上 + `order_status`、`order_from/to`、`order_ordering`、`transaction_from/to`、`transaction_ordering`、`ledger_from/to`、`ledger_page`、`ledger_page_size` |
@@ -425,27 +492,47 @@ PurchaseOrder (1) ──── (N) PurchaseOrderEvent
 13. 金额脱敏：非 manager 在 `MonetaryMaskMixin.monetary_fields` 上看到 `null`
 14. 角色检查 `superuser` 始终通过
 15. 销售明细新建时三件（shell + pcb_plan + cable）必须齐备（BOM-2.0 起 serializer 校验）；`pcb_plan` 必须 `is_active=True`
-16. 排产单 EXECUTED 后**不可逆**：admin 只读、ViewSet 拒绝 DESTROY、再 save 由 pre_save 钩子识别状态未变化跳过扣料；要"退料"必须录反向 StockAdjustment
-17. 排产扣料**允许库存变负**——半成品 / 原材料补货节奏与排产解耦，本系统只记账不阻止排产
-18. PCB 方案明细的 `material` 必须是 `category_type=RAW_MATERIAL` 类型（serializer 校验 + model `limit_choices_to`）
-19. 排产 EXECUTED 时每条 line 写 **(2 + N) 条** `StockAdjustment(PRODUCE_CONSUME)`：1 条 shell + 1 条 cable + N 条 plan 展开的原材料（N = plan.materials.count）
+16. **ProductionRecord 是 append-only**（BOM-2.1）：API 仅 List/Create/Retrieve，没有 PATCH/DELETE；admin 已存在记录全字段只读；要撤销必须录反向 `StockAdjustment(MANUAL_IN)`
+17. 排产扣料**允许库存变负**——半成品 / 原材料补货节奏与排产解耦
+18. PCB 方案明细的 `material` 必须是 `category_type=RAW_MATERIAL`
+19. ProductionRecord 创建时（`created=True` 且 `skip_consumption=False`）写 **(2 + N) 条** `StockAdjustment(PRODUCE_CONSUME)`：1 条 shell + 1 条 cable + N 条 plan 展开的原材料
+20. **过排产禁止**（BOM-2.1）：`produced_quantity + new.quantity ≤ sales_item.quantity`，serializer 校验
+21. **首条 ProductionRecord 自动推 PRODUCING**（BOM-2.1）：信号驱动状态机，无需手动 PATCH
+22. **ShippingLog 校验**：`quantity_shipped ≤ max(0, min(sales_item.quantity, produced) - shipped)`——不能发未生产的货，不能超过订单总量
 
 ---
 
 ## 7. 前端（事实版）
 
-> 基于 `frontend/src/` 实际代码（2026-05-11 精读）重写。
+> 基于 `frontend/src/` 实际代码（2026-06-18 Stage C 重做后全面重写）重写。
+> 较 2026-05-11 版本，本节包括 design system 落地、9 个面板重做、财务流水合并、侧边导航分组等改动。
 
 ### 7.1 技术栈
 
 React 18 + TypeScript 5 + Vite 5 + Tailwind 3。无路由库（用 URL `?panel=` + `localStorage` 自实现）；无状态管理库；只有 `AuthContext` 一个全局 context。`npm run build` 仅跑 `vite build`，**不跑 `tsc --noEmit`**。
 
-### 7.2 入口与路由
+#### Design system 落地（2026-06-18 起）
+
+- **Token 集中在 `tailwind.config.js`**：颜色（primary / surface / ink / line / accent / success / danger / warning）、圆角（card 24px / input 12px / pill ∞）、阴影（card / card-hover）、字号（heading / subheading / body / caption / micro）、间距（page-x/y / card-x/y / section-gap）
+- **Primitives** 在 `components/primitives/`：`Card / PageHeader / Section / StatTriple / BomTriple / DueDatePill / SearchableSelect / StatusPillFilterRow / OrderListRow / ModalFooterButtons / ActionBar / Pill`，所有面板优先用 primitives，不再自造 `bg-white rounded-3xl border` 这种碎片
+- **Util** `utils/money.ts`：`formatMoney(value, fallback='—')` 千分位 + 无空格 + null 不渲染成 0（与 MonetaryMaskMixin 协同）；`sumMoney(items, qtyField)` 按 price × qty 汇总
+- 详见 `docs/design-system.md`（约定）+ `docs/ux-audit.md`（每个面板的痛点与重做提议）
+
+### 7.2 入口与路由 + 侧边导航
 
 - `main.tsx` → `<AuthProvider><App /></AuthProvider>`
-- `App.tsx` 负责：登录门、用户加载态、角色过滤后的导航、面板分发
-- 面板键：`inventory` / `sales` / `purchase` / `shipping` / `receiving` / `partners` / `selfMadeGallery` / `financeDetail`（共 8 个；总数 9 含 LoginForm）
-- `panelConfig`（`types.ts`）声明每个面板的标题、描述与 `roles`，`App` 据此过滤生成 `allowedPanels`，并把当前面板写回 URL & localStorage（key `mfs-active-panel`）
+- `App.tsx` 负责：登录门、用户加载态、`<Sidebar>` 渲染、面板分发
+- **面板键（9 个）**：`production` / `shipping` / `receiving` / `sales` / `purchase` / `inventory` / `selfMadeGallery` / `partners` / `pcbPlans`
+  - 2026-06-18 起 `financeDetail` 已合并进 `partners`（详见 §9.4）
+- **侧边导航**（`components/Sidebar.tsx`，2026-06-18 起替换原顶部横向 nav）：
+  - 桌面：固定 left-0 + 宽 16rem 永久展示；主内容 `lg:pl-64`
+  - 移动：默认 `-translate-x-full` 藏出屏，顶部汉堡按钮 `setMobileNavOpen(true)` 滑入；选完面板 `onMobileClose()` 自动收回
+  - **按业务环节分组**（`panelGroupConfig` + `panelGroupOrder` in `types.ts`）：
+    1. 日常作业（daily）：排产中心 / 发货控制 / 收货中心
+    2. 订单管理（orders）：销售管理 / 采购管理
+    3. 仓库与资产（warehouse）：库存中心 / 自产图库
+    4. 合作方与配置（setup）：合作方与结算 / PCB 方案
+- `panelConfig`（`types.ts`）声明每个面板的标题、描述、`roles`、`group`，`App` 据此过滤生成 `allowedPanels`，sidebar 按 `group` 二次聚合渲染（空组自动隐藏）
 
 ### 7.3 鉴权（`context/AuthContext.tsx`）
 
@@ -473,26 +560,49 @@ React 18 + TypeScript 5 + Vite 5 + Tailwind 3。无路由库（用 URL `?panel=`
 
 **统一缺陷**：所有列表 hook 都不传 query string 给后端、也不读 `count / next / previous`——后端 FilterSet / 分页能力前端从未使用，超过 20 条的数据看不到。
 
-### 7.5 共用组件（`components/common/`）
+### 7.5 共用组件（`components/common/` + `components/primitives/`）
 
-`FilterBar` + `FilterBar.Field`、`NavbarButton`（深色主操作 / 描边辅助）、`Modal`、`Pagination`、`PartnerSelect`、`StatusBadge`（带 `kind="sales|purchase"`）、`OrderDetailsView`、`OrderItemsEditor`、`PriceTag`、`BaseInput`。
+**Primitives**（design system 原子，2026-06-18 起优先用）：
+- `Card`（tone=default/subtle/accent/danger × padding=normal/tight/none × interactive/flat）
+- `PageHeader`（title + description + actions）
+- `Section`（accent 左色条 + 标题 + 右上 action）
+- `Pill`（tone=default/accent/warning/success/danger/muted × outline）
+- `StatTriple`（N 个数字横排展示）
+- `BomTriple`（外壳/PCB/线材 紧凑三行展示）
+- `DueDatePill`（按剩余天数着色：<0 danger / ≤3 warning / 4-7 accent / >7 muted）
+- `SearchableSelect`（可搜索下拉，替代原生 select 处理 30+ 项的场景）
+- `StatusPillFilterRow`（状态筛选 Pill row）
+- `OrderListRow`（销售/采购订单列表的统一行）
+- `ModalFooterButtons`（Modal 底部取消/提交按钮组合）
+- `ActionBar`（GhostButton + PrimaryButton 编组）
 
-`PartnerSelect` 是合作方输入的**唯一入口**，会用 `usePartnerSearch` 内部解析 `#ID` 与名称匹配。
+**Common**（业务相关共享）：
+- `Modal`（基础容器，支持 footer slot + maxWidth）
+- `Pagination`、`PartnerSelect`、`BaseInput`、`StatusBadge`
+- `OrderDetailsView`（销售/采购订单展开详情，含 StatTriple 金额摘要 + 明细 + 事件流 + 添加业务动态入口）
+- `OrderItemsEditor`（销售/采购明细编辑器，支持 sales 三件套 + purchase 分类联动 + 复用上一条交互）
+- `panels/inventory/AdjustModals.tsx`（`SingleAdjustModal` + `BatchAdjustModal`，被 InventoryPanel + SelfMadeGalleryPanel 共用）
+- `panels/partners/PartnerDetail.tsx` + `LedgerTable.tsx` + `TransactionFormModal.tsx`（合作方详情 + 流水 CRUD + 台账）
+
+**已废弃**：`FilterBar` + `FilterBar.Field` + `NavbarButton` 在重做的面板里逐步退场，未重做的旧面板仍有引用。
 
 ### 7.6 面板与后端的能力对账
 
-| 面板 | 前端 roles | 后端可访问角色 | 复用 hooks |
+| 面板 | 前端 roles | 后端可访问角色 | 数据来源 |
 |---|---|---|---|
-| `inventory` | manager / warehouse | 一致 | `useProducts` + `useCategories` + 内联调用 `api.createStockAdjustment` |
-| `sales` | manager | manager + shipper（后端松） | `useSalesOrders` + `useCustomerPreferredProducts` |
-| `purchase` | manager | manager + warehouse（后端松） | `usePurchaseOrders` + `usePartners` |
+| `production` | 三角色 | 一致 | `useSalesOrders` + 内联 `api.createProductionRecord` |
 | `shipping` | manager / shipper | 一致 | `useSalesOrders` + `useShippingLogs` |
-| `receiving` | manager / warehouse | 一致 | `usePurchaseOrders` + `usePartners` |
-| `partners` | manager | 一致 | `usePartners` + `usePaginatedFilter` |
-| `selfMadeGallery` | manager / warehouse | 一致 | `useProducts` + `useCategories` |
-| `financeDetail` | manager | 一致 | `useFinanceTransactions` + `usePartners` |
+| `receiving` | manager / warehouse | 一致 | `usePurchaseOrders` 自管 |
+| `sales` | manager | manager / warehouse / shipper（后端 ReadOnly） | `useSalesOrders` 自管（filter + 分页） |
+| `purchase` | manager | manager / warehouse（后端 ReadOnly） | `usePurchaseOrders` 自管 |
+| `inventory` | manager / warehouse | 一致 | `useProducts` + `useCategories` + `AdjustModals` |
+| `selfMadeGallery` | manager / warehouse | 一致 | `useProducts` + `useCategories` + 共用 `AdjustModals` |
+| `partners` | manager | 一致 | `usePartners` + `PartnerDetail` 内含 `useFinanceTransactions` |
+| `pcbPlans` | manager | 一致 | `usePcbPlans` + `useProducts`（原材料下拉） |
 
-> sales / purchase 前端比后端紧——shipper 通过 `ShippingPanel` 可以间接看到销售单数据；warehouse 通过 `WarehouseReceivingPanel` 可以间接看到采购单数据。是设计选择不是 bug，但**需要在 PRD 里明文说**以免误以为是权限漏洞。
+**自管数据 hook 的面板**（2026-06-18 起多数已切换）：SalesOrdersPanel / PurchasePanel / WarehouseReceivingPanel / ShippingPanel / PcbPlanPanel 等都自带 `usePartnerOrders/...` 调用，App.tsx 不再中央拉数据。这样切面板时不强制全量重拉，每个面板可独立带 filter + 分页。
+
+> sales / purchase 前端比后端紧——shipper 通过 `ShippingPanel` 可以间接看到销售单数据；warehouse 通过 `WarehouseReceivingPanel` / `ProductionPanel` 可以间接看到销售/采购单数据（金额脱敏后）。是设计选择不是 bug。
 
 ### 7.7 与后端契约的硬约束（前端必须遵守）
 
@@ -555,9 +665,105 @@ React 18 + TypeScript 5 + Vite 5 + Tailwind 3。无路由库（用 URL `?panel=`
 22. `PartnerLedgerEntry` 的 `OPENING`（期初余额）类型在代码中未被任何路径写入，是为人工导入预留的接口。
 23. `media/` 当前由 Django 在 DEBUG 下直发，生产部署需走 nginx/CDN（见 `deployment-rules.md`）。
 24. `scripts/seed_mock_data.py` 中 `FINANCE_TRANSACTIONS` spec 用 `.objects.create` 绕过序列化器，amount 不会被 `_normalize_amount` 规范化；部分条目（如"海外客户B PAYMENT -18000"）的符号与生产语义不一致——客户回款语义上是 RECEIPT，不是 PAYMENT。这是种子数据 spec 笔误，不是 schema bug。建议把 spec 改成符合 RECEIPT/PAYMENT 一律取负的约定，或者让 seed 也走序列化器。
+25. **跨订单挪用已生产成品**（BOM-2.1 起的边缘场景）：减单后产生的"幽灵库存"（已生产但本订单内不可发的部分），目前需要走 admin 后台手动创建 `ProductionRecord(skip_consumption=True)` 把这批成品"挂到"另一个销售明细下。无前端 UI 支持。如果该场景变得高频，可考虑加专门的 admin/UI 动作 + 调拨记录表来正式建模"成品调拨"。
 
 ### 9.4 Changelog（已修）
 
+- **2026-06-18**：**Stage C 全面落地 —— design system + 9 个面板重做 + 财务加固 + 发货单 PDF + 侧边导航 + warehouse 排产权限**。一次性会话改动汇总，涉及 16 个 task。
+
+  **后端**：
+  - **交期字段**：`SalesOrder.expected_delivery_date` + `PurchaseOrder.expected_arrival_date`（DateField, nullable）。migration `business/0019_order_due_dates`。Serializer 暴露读写。前端在排产/发货/收货/销售/采购的卡片右上角用 `DueDatePill` 派生紧迫度（详见 §3.2）
+  - **订单号格式改造**：`_generate_sequential_order_no` 加 `width=3` 参数；prefix 改用 `SO-yyyymmdd` / `PO-yyyymmdd`（含横线），按日重置序号 3 位。旧格式 `SO{year}-NNNN` 历史数据保留，新旧 prefix 不前缀相交，select_for_update 不冲突。`timezone.localdate()` 避免 UTC 跨日漂移
+  - **财务加固**（§4.4 第 7 点 + 测试 `FinanceGuardrailsTest`）：
+    - `SalesOrderSerializer.Meta.read_only_fields = ['total_amount']`（PurchaseOrderSerializer 同款）——客户端 PATCH 时 DRF 静默丢弃，防止 order.total_amount 被改成与 ledger 不一致
+    - `update()` 检测 `partner_id` 变化时（items_data is None 情况下）保存任意一条 item 触发 `sync_*_order_ledger` signal，确保 ledger entry 跟着 partner 切换。覆盖 R1 partner-only PATCH 同步缺口
+  - **权限调整**：新增 `ManagerOrFulfillmentReadOnly`（manager 全权 / warehouse + shipper 只读）。`SalesOrderViewSet` 从 `ManagerOrShipperReadOnly` 切到新类，让 warehouse 能读销售订单——`ProductionPanel` 依赖 `useSalesOrders` 拉销售明细打平排产，之前 warehouse 进面板 403 看不到任何数据。`setup_roles.py` 同步给 warehouse 加 `SalesOrder/SalesOrderItem (view)` + `ProductionRecord (view, add)`；shipper 也补 `ProductionRecord (view, add)`
+  - **发货单 PDF**：新文件 `business/api/shipping_note_pdf.py` 用 ReportLab + 真实 TTF（macOS PingFang / Linux Noto / Windows 微软雅黑 / STSong-Light 兜底）渲染 A4。2 客户/页布局 + 虚线裁剪提示 + KeepTogether 不跨页。`ShippingLogViewSet.export_pdf` action（`?log_ids=`）返回 `application/pdf`。注册 `PDFRenderer` 让 DRF 内容协商承认 application/pdf；错误用 `JsonResponse` 旁路。`settings.SHIPPING_NOTE_COMPANY_NAME` 配置抬头。详见 §4.6
+  - **依赖**：`reportlab==4.2.5` 加入 requirements
+
+  **前端 design system**：
+  - `tailwind.config.js` 已有 tokens，本次会话**严格收敛**：删掉 9 个面板里 95% 以上的 `slate-*` / `amber-*` / `rose-*` / `emerald-*` 硬编码，替换为语义 token
+  - 新增 **3 个 primitives**：`StatusPillFilterRow` / `OrderListRow` / `ModalFooterButtons`（共享小积木策略，详见 ux-audit §3）
+  - 新增 **4 个 primitives**：`DueDatePill` / `SearchableSelect` / `BomTriple` / 顺带的 `formatMoney` util
+  - 新增 **共享 Modal 库**：`panels/inventory/AdjustModals.tsx`（`SingleAdjustModal` + `BatchAdjustModal`），被 InventoryPanel + SelfMadeGalleryPanel 共用
+
+  **前端面板重做（9 个 + 子组件）**：
+  - **ProductionPanel + ShippingPanel**：扁平销售明细 grid（Card 网格），顶部全局 ActionBar（搜索 / 草稿填满 / 一键提交）+ 确认 Modal 汇总。`BomTriple` 卡片内展示外壳/PCB/线材。右上角 `DueDatePill`
+  - **SalesOrdersPanel**：完整重做。`PageHeader` 替换自造 h2；状态筛选 select → `StatusPillFilterRow` Pill row；列表行 → `OrderListRow`；编辑 Modal 用 `Section` 分两段（① 客户与交期 含 DueDatePill 预览 ② 订单明细）；列表行的"记录动态"按钮折叠到 `OrderDetailsView` 事件流末尾的"+ 添加业务动态"大入口；金额走 `formatMoney`
+  - **PurchasePanel**：mirror 销售改造。自管 `usePurchaseOrders`（之前从 App.tsx 拿 props），server-side filter 与销售对齐。修 typo（`bg-白` / `text-rigth`）。状态编辑保留（采购允许通用 PATCH 改 status）
+  - **WarehouseReceivingPanel**：自管 hook。`StatusPillFilterRow` 替换大双 tab 切换；订单卡 = Card 嵌套 item Card（去掉桌面/移动双重 JSX）；收货 Modal 简化（删"选择收货物料"下拉，已知 item 只读；数量默认剩量；顶部 banner → mini Section header）；**新增**批量收货 Modal（订单卡顶部按钮触发，列出所有未收完 item + per-row 数量 + 共享备注）；进度条删掉留数字
+  - **InventoryPanel** v1 v2：v1 做了 Card grid + 全部填 1/0.5 快捷键 → 用户反馈这些按钮 toy。v2 改为：**搜索优先**（一个大搜索框）+ `SearchableSelect` 分类筛选 + **紧凑物料行列表**（不是 Card 网格）+ **单件调整 Modal**（90% 场景）+ **多件批量 Modal**（10% 场景，用于自产件批量入库），分页 50/页。出库后库存允许为负，软警示（黄字"调整后库存 = -N，暂时为负"）而非硬阻塞
+  - **SelfMadeGalleryPanel**：标题"自产外壳图库" → "自产件图库"（含 SELF_MADE + CABLE）。图卡用 `Card interactive` 包装；图位 aspect-4/3 + 左上分类 Pill + 右下"低于安全" Pill。共用 `AdjustModals`，传 `title="调整自产件库存"`
+  - **PartnerManagementPanel** + 财务面板合并：**`FinanceDetailPanel` 整段删除**（合并进合作方详情的"转账流水"tab）。`panelConfig.financeDetail` 移除，App.tsx 路由删除。原 partners 5 个子组件（PartnerHeader / Table / DetailContainer / DetailView / List）整合成 `PartnerDetail.tsx`（详情容器 + 视图 + 流水 CRUD 一体）+ `TransactionFormModal.tsx`（新建/编辑流水共用）+ `LedgerTable.tsx`（重写：去双重 JSX + 用 formatMoney）。台账导出加年份选择（"导出 YYYY 年台账"）
+  - **PcbPlanPanel**：方案卡物料默认折叠（"N 种物料 ▾ 展开查看"）；编辑 Modal Section 分两段；物料行用 `Card tone="subtle"` 替代 12 列 grid；原材料下拉 → SearchableSelect；删掉"全量替换"实现细节提示
+  - **侧边导航 Sidebar**：替换原顶部横向 nav，按业务环节 4 组分组（详见 §7.2）
+
+  **CategoryForm / ProductForm / BaseInput** 升级：从 `rounded-full` + slate-* 改成 design tokens（`rounded-input` + `text-body` + `border-line` 等），与 Modal 内其它输入一致
+
+  **测试**：
+  - `FinanceGuardrailsTest`（4 个 cases）覆盖财务加固 R1 + R2
+  - 之前所有测试保持通过
+
+  **文档**：本节 §2.2 + §3.2 + §4.4 + §4.6 + §5.3 + §7（整段） + §9.4 同步更新
+
+  **部署需要做的事**：
+  - `pip install -r requirements.txt`（装 reportlab）
+  - `python manage.py migrate`（应用 0019）
+  - `python manage.py shell -c "from scripts.setup_roles import run; run()"`（让 warehouse 拿到 SalesOrder view 权限 + ProductionRecord add 权限）
+
+- **2026-05-27**：**BOM-2.1 排产模型重设计 —— 单据制 → 事件流**。
+  业务侧确认"一天一张排产单"不是物理凭证，仅为脑子里的当日生产规划。
+  独立 `ProductionOrder` 主表 + `ProductionOrderLine` 子表 + PLANNED/EXECUTED
+  两段状态机被彻底取消，改为单一 `ProductionRecord`（append-only 事件，挂在
+  `SalesOrderItem` 下，与 `ShippingLog` 完全对称）。
+  - **数据模型**：删 `business.ProductionOrder` + `business.ProductionOrderLine`；
+    新建 `business.ProductionRecord(sales_item FK CASCADE, quantity, skip_consumption,
+    operator, note, executed_at)`。migration 0018 直接 drop 两表 + create 一表
+    （开发期测试数据可丢，用户确认）。
+  - **SalesOrderItem 新增派生量**：
+    - `produced_quantity = Σ ProductionRecord.quantity`
+    - `available_to_ship_quantity = max(0, min(quantity, produced) - shipped)`
+    - 序列化器输出，前端在销售/排产/发货面板里展示。
+  - **信号链重写**：
+    - 删 `_stash_production_order_previous_status` + `execute_production_consumption`
+    - 加 `auto_consume_on_production_record_create`：post_save(created=True) 时写
+      (2 + N) 条 PRODUCE_CONSUME，shell/cable/pcb_plan 全部从 sales_item 取，
+      单一真相来源。`skip_consumption=True` 时跳过扣料（admin 边缘场景）。
+    - 加 `auto_promote_to_producing`：首条 ProductionRecord 创建时 SalesOrder
+      ORDERED → PRODUCING，状态机终于有自动驱动了。
+  - **校验**：
+    - 过排产被拒：`produced + new > sales_item.quantity` → 400。
+    - 减单边界：仍只校验 `quantity >= shipped_quantity`（不阻止减到 < produced，
+      多余成品成为"幽灵库存"，业务侧自管，详见 §9.3）。
+    - ShippingLog: `quantity_shipped ≤ max(0, min(quantity, produced) - shipped)`，
+      不能发未生产的货。
+  - **API**：
+    - 删 `/api/business/production-orders/` 全套（含 execute/cancel actions）
+    - 新增 `/api/business/production-records/`（List/Create/Retrieve，append-only）
+      - 过滤：`sales_item / sales_order / partner / executed_from/to / operator`
+      - 写入路径强制 `skip_consumption=False`（防止业务侧误用）
+      - 三角色（manager / warehouse / shipper）都可创建
+  - **前端**：
+    - 删 `useProductionOrders.ts`，新建 `useProductionRecords.ts`
+    - **重写** `ProductionPanel.tsx` —— 以销售明细为主视角的"今日排产列表"，
+      每行显示订单/客户/商品/总量/已生产/已发/待排 + 输入"今天做几套" + 排产按钮，
+      点击即扣料。不再有"排产单号"概念。
+    - `ShippingPanel` + `ShippingEntryForm` + `ShippingStatusTable` 改用
+      `available_to_ship_quantity` —— 发货可选明细按"可发 > 0"过滤，进度列
+      展示"已生产 / 已发 / 总量 · 可发"四元组；available=0 的行不隐藏（让
+      "生产中"状态可见）。
+    - `OrderDetailsView`（销售明细展开）加 produced/shipped/awaiting/available
+      四元组小行。
+    - api/client.ts：drop ProductionOrders* 全套接口，加 `getProductionRecords` +
+      `createProductionRecord`。
+  - **后端测试**：删 `BOMProductionOrderTest`，加 `ProductionRecordTest` 6 条用例
+    （扣料正确、状态机推进、produced/available 派生量、skip_consumption 跳过、
+    允许负库存、API 过排产 400、API PATCH/DELETE 405）。
+  - **不变量更新**（§6）：
+    - 排产创建 = (2 + N) 条 PRODUCE_CONSUME（除非 skip_consumption）
+    - 过排产禁止
+    - ShippingLog ≤ available_to_ship
+    - 首条 ProductionRecord 自动推 PRODUCING
 - **2026-05-21**：**BOM-2.0 PCB 方案改造**。把板材从"半成品 FK"重构为"PCB 方案 = 原材料配方"，
   排产 EXECUTED 时一次性扣减 1 外壳 + 1 线材 + N 原材料（方案展开）。系统从此不再
   跟踪"中间板材"库存，与实际工厂流程对齐（外包加工商按方案领料贴片送回 + 装配 = 一个原子动作）。

@@ -1,106 +1,159 @@
-// src/components/panels/warehouse/ReceivingModal.tsx
-import React from 'react';
+import { useEffect, useState } from 'react';
 import Modal from '../../common/Modal';
-import NavbarButton from '../../common/NavbarButton';
+import { Card, Section, ModalFooterButtons } from '../../primitives';
 
-interface ReceivingModalProps {
+/**
+ * 单条收货 Modal（Stage C-5 redesign，2026-06-18）。
+ *
+ * 改造要点（详见 docs/ux-audit.md §2.5）：
+ *   - 删掉旧版"选择收货物料"下拉——从订单卡某一行点进来时已经明确 item，
+ *     再选一遍是冗余。Modal 只读显示当前物料名 + 剩量。
+ *   - 数量字段默认 = 剩量，placeholder 也写 `剩 N`，用户改一下就行（最常见
+ *     场景：实收 = 剩量；偶尔少量短收）。
+ *   - 顶部那张深色 banner 删掉，改用 Section 风格 mini header（供应商 / 单号）。
+ *   - 底部按钮统一走 ModalFooterButtons。
+ */
+
+interface PurchaseItem {
+  id: number;
+  product: number;
+  product_detail?: { model_name: string; description?: string } | null;
+  quantity: number;
+  received_quantity?: number;
+}
+
+interface Order {
+  id: number;
+  partner_name?: string;
+  partner?: number;
+  order_no: string;
+  items: PurchaseItem[];
+}
+
+interface Props {
   open: boolean;
   onClose: () => void;
-  order: any;
-  draft: { purchaseItemId: number | null; quantity: string; remark: string };
-  setDraft: (val: any) => void;
-  onConfirm: () => void;
+  order: Order | null;
+  itemId: number | null;
+  /** 提交时把 `{quantity, remark}` 交给父组件去发请求。 */
+  onSubmit: (params: { quantity: number; remark: string }) => Promise<void> | void;
   error: string | null;
   saving: boolean;
 }
 
-export const ReceivingModal = ({ 
-  open, onClose, order, draft, setDraft, onConfirm, error, saving 
-}: ReceivingModalProps) => {
-  if (!order) return null;
+export function ReceivingModal({ open, onClose, order, itemId, onSubmit, error, saving }: Props) {
+  const item = order?.items.find((i) => i.id === itemId) ?? null;
+  const remaining = item ? Math.max(0, Number(item.quantity) - Number(item.received_quantity ?? 0)) : 0;
+
+  const [quantity, setQuantity] = useState<string>('');
+  const [remark, setRemark] = useState<string>('');
+
+  // 打开 Modal 或换 item 时，默认数量 = 剩量，备注清空。
+  useEffect(() => {
+    if (open && item) {
+      setQuantity(String(remaining));
+      setRemark('');
+    }
+  }, [open, item?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!order || !item) return null;
+
+  const qtyNum = Number(quantity);
+  const isOverflow = quantity.trim() !== '' && qtyNum > remaining;
+  const isInvalid = quantity.trim() === '' || qtyNum <= 0 || isOverflow;
+
+  const handleSubmit = () => {
+    onSubmit({ quantity: qtyNum, remark: remark.trim() });
+  };
 
   return (
-    <Modal 
-      open={open} 
-      onClose={onClose} 
-      title="物料收货确认" 
-      maxWidth="max-w-xl"
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="确认收货"
+      maxWidth="max-w-lg"
       footer={
-        <div className="flex flex-col md:flex-row gap-3 w-full">
-          <NavbarButton variant="outline" className="w-full md:flex-1 py-4 order-2 md:order-1 font-bold" onClick={onClose}>
-            取消
-          </NavbarButton>
-          <NavbarButton 
-            className="w-full md:flex-1 py-4 bg-slate-900 text-white order-1 md:order-2 font-black shadow-xl shadow-slate-200" 
-            disabled={saving} 
-            onClick={onConfirm}
-          >
-            {saving ? '同步中...' : '确认入库'}
-          </NavbarButton>
-        </div>
+        <ModalFooterButtons
+          onCancel={onClose}
+          onSubmit={handleSubmit}
+          isSaving={saving}
+          submitDisabled={isInvalid}
+          submitLabel="确认入库"
+          savingLabel="入库中..."
+        />
       }
     >
-      <div className="space-y-6 py-2">
-        {/* 订单预览卡片 */}
-        <div className="bg-slate-900 rounded-[2rem] p-5 text-white shadow-lg">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.3em]">Purchase Order Context</p>
-          <p className="text-lg font-bold mt-2 leading-snug">{order.partner_name}</p>
-          <p className="text-[11px] font-mono text-slate-500 mt-1 uppercase tracking-widest">{order.order_no}</p>
-        </div>
+      <div className="space-y-section-gap">
+        {/* 订单上下文 mini header */}
+        <Card flat tone="subtle" padding="tight">
+          <p className="text-body font-bold text-ink truncate">{order.partner_name || `供应商#${order.partner}`}</p>
+          <p className="text-micro text-ink-faint font-mono mt-0.5">{order.order_no}</p>
+        </Card>
+
+        {/* 物料只读卡 */}
+        <Section title="收货物料">
+          <Card flat tone="default" padding="tight">
+            <p className="text-body font-bold text-ink">
+              {item.product_detail?.model_name || `物料#${item.product}`}
+            </p>
+            {item.product_detail?.description && (
+              <p className="text-caption text-ink-muted italic mt-1 leading-relaxed">
+                {item.product_detail.description}
+              </p>
+            )}
+            <p className="text-caption text-ink-faint mt-2">
+              剩量 <span className="font-mono text-ink-body font-bold">{remaining}</span> · 已收{' '}
+              <span className="font-mono text-ink-body">{Number(item.received_quantity ?? 0)}</span> / 总量{' '}
+              <span className="font-mono text-ink-body">{Number(item.quantity)}</span>
+            </p>
+          </Card>
+        </Section>
+
+        {/* 数量 + 备注 */}
+        <Section title="本次到货">
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <span className="text-micro font-bold text-ink-faint uppercase tracking-wider ml-0.5">
+                本次入库数量
+              </span>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max={remaining}
+                value={quantity}
+                onChange={(e) => setQuantity(e.target.value)}
+                className={`w-full rounded-input border bg-surface px-3 py-2 text-body font-mono outline-none
+                            focus:ring-2 focus:ring-primary/5 transition-colors
+                            ${isOverflow ? 'border-danger text-danger' : 'border-line focus:border-line-focus'}`}
+                placeholder={`剩 ${remaining}`}
+              />
+              {isOverflow && (
+                <p className="text-micro text-danger ml-0.5">超过剩量 {remaining}</p>
+              )}
+            </div>
+            <div className="space-y-1">
+              <span className="text-micro font-bold text-ink-faint uppercase tracking-wider ml-0.5">
+                批次备注（可选）
+              </span>
+              <input
+                type="text"
+                value={remark}
+                onChange={(e) => setRemark(e.target.value)}
+                placeholder="例：包装有破损 / 缺纸箱"
+                className="w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none
+                           focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors"
+              />
+            </div>
+          </div>
+        </Section>
 
         {error && (
-          <div className="bg-rose-50 border-2 border-rose-100 p-5 rounded-2xl text-rose-600 text-sm font-black animate-in shake duration-300">
-            ⚠️ 错误提示：{error}
-          </div>
+          <Card tone="danger" padding="tight" flat>
+            <p className="text-caption text-danger-ink">⚠ {error}</p>
+          </Card>
         )}
-
-        <div className="space-y-5">
-          {/* 物料选择器 */}
-          <div className="space-y-2">
-            <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest ml-2">选择收货物料</label>
-            <select
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-800 outline-none focus:border-slate-900 focus:bg-white transition-all"
-              value={draft.purchaseItemId ?? ''}
-              onChange={(e) => setDraft({ ...draft, purchaseItemId: Number(e.target.value) })}
-            >
-              <option value="">请选择物料...</option>
-              {order.items.map((item: any) => {
-                const remaining = Number(item.quantity) - Number(item.received_quantity ?? 0);
-                return (
-                  <option key={item.id} value={item.id} disabled={remaining <= 0}>
-                    {item.product_detail?.model_name} (待收: {Math.max(remaining, 0)})
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-
-          {/* 数量输入 */}
-          <div className="space-y-2">
-            <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest ml-2">本次到货数量</label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-lg font-bold text-slate-900 outline-none focus:border-slate-900 focus:bg-white transition-all placeholder:text-slate-300"
-              placeholder="0"
-              value={draft.quantity}
-              onChange={(e) => setDraft({ ...draft, quantity: e.target.value })}
-            />
-          </div>
-
-          {/* 备注输入 */}
-          <div className="space-y-2">
-            <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest ml-2">收货备注 (选填)</label>
-            <input
-              type="text"
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium outline-none focus:border-slate-900 focus:bg-white transition-all placeholder:text-slate-300"
-              placeholder="记录批次、损坏情况等..."
-              value={draft.remark}
-              onChange={(e) => setDraft({ ...draft, remark: e.target.value })}
-            />
-          </div>
-        </div>
       </div>
     </Modal>
   );
-};
+}

@@ -3,15 +3,16 @@ from decimal import Decimal
 from django.contrib.auth.models import User, Group
 from django.test import TestCase
 from django.utils import timezone
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from core.models import Partner, Category, Product
 from business.models import (
     SalesOrder, SalesOrderItem, ShippingLog,
     PurchaseOrder, PurchaseOrderItem, ReceivingLog, FinancialTransaction,
     StockAdjustment, StockLog, CustomerPreferredProduct,
-    ProductionOrder, ProductionOrderLine,
+    ProductionRecord,
 )
+from business.api.serializers import SalesOrderSerializer, PurchaseOrderSerializer
 
 class FactoryBusinessFlowTest(TestCase):
     def setUp(self):
@@ -328,6 +329,13 @@ class BusinessAPITest(APITestCase):
                 )
 
     def test_shipping_log_requires_shipper_or_manager(self):
+        # BOM-2.1（2026-05-27）：ShippingLog 可发量 = min(quantity, produced) - shipped。
+        # 需要先排产让 produced > 0，才能发货。这里直接调 ORM 创建一条 ProductionRecord
+        # （signal 会自动扣料）。详见 docs/PRD.md §4.5。
+        ProductionRecord.objects.create(
+            sales_item=self.sales_item, quantity=Decimal('30'), operator='setup',
+        )
+
         payload = {
             "sales_item": self.sales_item.id,
             "quantity_shipped": "30",
@@ -636,26 +644,187 @@ class OrderDeletionLedgerTest(TestCase):
         self.assertEqual(self.supplier.balance, Decimal('0.00'))
 
 
-class BOMProductionOrderTest(TestCase):
-    """BOM-2.0 排产系统核心断言。
+class FinanceGuardrailsTest(TestCase):
+    """财务/订单合约的加固检查（2026-06-18 audit 后补的保护层）。
+
+    覆盖两个曾在审计中识别的中度风险：
+      - R1：partner-only PATCH 应该正确同步 ledger
+        （旧实现：signal 只盯 SalesOrderItem，partner-only PATCH 不触发 → 旧 partner
+         的 balance 还含这笔订单，新 partner 不含。修复见 SalesOrderSerializer.update
+         里的 "if items_data is None and old_partner_id != ..." 守卫。）
+      - R2：total_amount 是 signal 维护的派生字段，必须 read-only
+        （旧实现：客户端能直接 PATCH 覆盖 → 与 ledger 不一致。
+         修复见 SalesOrderSerializer.Meta.read_only_fields。）
+
+    同款保护对采购单也加了，本测试两边都验证。
+    """
+
+    def setUp(self):
+        self.customer_a = Partner.objects.create(name='Guardrail 客户A', partner_type='CUSTOMER')
+        self.customer_b = Partner.objects.create(name='Guardrail 客户B', partner_type='CUSTOMER')
+        self.supplier_a = Partner.objects.create(name='Guardrail 供应商A', partner_type='SUPPLIER')
+        self.supplier_b = Partner.objects.create(name='Guardrail 供应商B', partner_type='SUPPLIER')
+        cat = Category.objects.create(name='Guardrail cat', category_type='SELF_MADE')
+        self.product = Product.objects.create(
+            category=cat,
+            internal_code='G-PROD-1',
+            model_name='G1',
+            stock_quantity=0,
+        )
+
+    # ------------------------------------------------------------------
+    # R1：partner-only PATCH 同步 ledger
+    # ------------------------------------------------------------------
+
+    def test_sales_switch_partner_without_items_resyncs_ledger(self):
+        """PATCH 销售单 partner（不带 items_payload）必须把旧 partner 余额清零并迁移到新 partner。"""
+        so = SalesOrder.objects.create(
+            order_no='SO-SWITCH-1', partner=self.customer_a, operator='m',
+        )
+        SalesOrderItem.objects.create(
+            order=so, product=self.product, custom_product_name='x',
+            price=Decimal('100.00'), quantity=Decimal('10'),
+        )
+        self.customer_a.refresh_from_db()
+        self.assertEqual(self.customer_a.balance, Decimal('1000.00'))
+        self.assertEqual(self.customer_b.balance, Decimal('0.00'))
+
+        serializer = SalesOrderSerializer(
+            instance=so,
+            data={'partner': self.customer_b.id},
+            partial=True,
+            context={'request': None},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.customer_a.refresh_from_db()
+        self.customer_b.refresh_from_db()
+        self.assertEqual(self.customer_a.balance, Decimal('0.00'),
+                         '旧 partner 的 ledger entry 应该被迁走')
+        self.assertEqual(self.customer_b.balance, Decimal('1000.00'),
+                         '新 partner 的 balance 应该等于订单总额')
+
+    def test_purchase_switch_partner_without_items_resyncs_ledger(self):
+        """同款保护对采购单也要生效。"""
+        po = PurchaseOrder.objects.create(
+            order_no='PO-SWITCH-1', partner=self.supplier_a, operator='m',
+        )
+        PurchaseOrderItem.objects.create(
+            order=po, product=self.product,
+            price=Decimal('50.00'), quantity=Decimal('20'),
+        )
+        self.supplier_a.refresh_from_db()
+        self.assertEqual(self.supplier_a.balance, Decimal('1000.00'))
+
+        serializer = PurchaseOrderSerializer(
+            instance=po,
+            data={'partner': self.supplier_b.id},
+            partial=True,
+            context={'request': None},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.supplier_a.refresh_from_db()
+        self.supplier_b.refresh_from_db()
+        self.assertEqual(self.supplier_a.balance, Decimal('0.00'))
+        self.assertEqual(self.supplier_b.balance, Decimal('1000.00'))
+
+    # 注：原本还有一个 "test_sales_switch_partner_with_items_payload_works"
+    # 想覆盖"同时切 partner + 带 items_payload"的路径，但 SalesOrderItemWriteSerializer
+    # 把每一行 items_payload 当 create 路径校验，强制要求三件套（外壳/PCB/线材），
+    # 而构造完整 BOM 数据只为了顺带验"守卫不会重复同步"得不偿失——
+    # 守卫逻辑是 `if items_data is None ...`，互斥语义显而易见，不需要单测。
+    # 这条路径的实际行为在 FactoryBusinessFlowTest / SalesPanelEditTest 等
+    # 端到端用例中已经覆盖。
+
+    # ------------------------------------------------------------------
+    # R2：total_amount 必须 read-only
+    # ------------------------------------------------------------------
+
+    def test_sales_total_amount_in_payload_is_dropped(self):
+        """客户端 PATCH `{total_amount: 99999}` 时应被 DRF 静默丢弃，
+        ledger 与 SalesOrder.total_amount 都保持 signal 算出的真实值。"""
+        so = SalesOrder.objects.create(
+            order_no='SO-FAKE-1', partner=self.customer_a, operator='m',
+        )
+        SalesOrderItem.objects.create(
+            order=so, product=self.product, custom_product_name='x',
+            price=Decimal('100.00'), quantity=Decimal('10'),
+        )
+        so.refresh_from_db()
+        original_total = so.total_amount
+        self.assertEqual(original_total, Decimal('1000.00'))
+
+        serializer = SalesOrderSerializer(
+            instance=so,
+            data={'total_amount': '99999.00'},
+            partial=True,
+            context={'request': None},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        # validated_data 不应该含 total_amount——read_only_fields 已挡住
+        self.assertNotIn('total_amount', serializer.validated_data)
+        serializer.save()
+
+        so.refresh_from_db()
+        self.assertEqual(so.total_amount, original_total,
+                         'total_amount 不能被客户端覆盖')
+        self.customer_a.refresh_from_db()
+        self.assertEqual(self.customer_a.balance, Decimal('1000.00'),
+                         'ledger 不受 total_amount payload 影响')
+
+    def test_purchase_total_amount_in_payload_is_dropped(self):
+        """同款保护对采购单也要生效。"""
+        po = PurchaseOrder.objects.create(
+            order_no='PO-FAKE-1', partner=self.supplier_a, operator='m',
+        )
+        PurchaseOrderItem.objects.create(
+            order=po, product=self.product,
+            price=Decimal('50.00'), quantity=Decimal('20'),
+        )
+        po.refresh_from_db()
+        original_total = po.total_amount
+        self.assertEqual(original_total, Decimal('1000.00'))
+
+        serializer = PurchaseOrderSerializer(
+            instance=po,
+            data={'total_amount': '88888.00'},
+            partial=True,
+            context={'request': None},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('total_amount', serializer.validated_data)
+        serializer.save()
+
+        po.refresh_from_db()
+        self.assertEqual(po.total_amount, original_total)
+        self.supplier_a.refresh_from_db()
+        self.assertEqual(self.supplier_a.balance, Decimal('1000.00'))
+
+
+class ProductionRecordTest(TestCase):
+    """BOM-2.1 排产记录核心断言（2026-05-27 重设计）。
 
     覆盖：
-    - 排产单 EXECUTED → 写 **(2 + N)** 条 PRODUCE_CONSUME 调整：
-      1 条扣 shell（quantity 个）+ 1 条扣 cable（quantity 个）+
-      N 条扣 plan.materials 展开的原材料（line.quantity × material.qty_per_unit）
-    - 排产 append-only：EXECUTED 后再 save 不重复扣料（幂等保护）
+    - ProductionRecord 创建 → 写 **(2 + N)** 条 PRODUCE_CONSUME：
+      1 条扣 shell + 1 条扣 cable + N 条扣 plan.materials 展开的原材料
+    - 创建时自动推 SalesOrder.status: ORDERED → PRODUCING（状态机驱动）
+    - 过排产被拒（produced + new > sales_item.quantity → ValidationError）
+    - skip_consumption=True 时不扣料（仅 admin 后台路径）
     - 允许库存变负
-    - PLANNED 状态不触发扣料
-    详见 docs/PRD.md §4.5 排产流程 与 §9.4 changelog 2026-05-21（PCB 方案改造）。
+    - SalesOrderItem 的 produced_quantity / available_to_ship_quantity 派生量正确
+
+    详见 docs/PRD.md §3.2 / §4.5 / §9.4 changelog 2026-05-27（BOM-2.1）。
     """
 
     def setUp(self):
         from core.models import PcbPlan, PcbPlanMaterial
 
-        # 半成品分类
+        # 半成品 / 原材料分类
         self.cat_shell = Category.objects.create(name='外壳分类', category_type='SELF_MADE')
         self.cat_cable = Category.objects.create(name='线材分类', category_type='CABLE')
-        # 原材料分类（用于 PCB 方案展开）
         self.cat_raw = Category.objects.create(name='原材料分类', category_type='RAW_MATERIAL')
 
         self.shell = Product.objects.create(
@@ -666,7 +835,6 @@ class BOMProductionOrderTest(TestCase):
             category=self.cat_cable, internal_code='CB-US-150', model_name='美标 1.5m',
             stock_quantity=Decimal('0'),  # 故意设 0 以测"允许负库存"
         )
-        # 原材料：1 颗主控芯片（1:1）+ 5 颗电容（1:5）+ 1 块裸板（1:1）
         self.raw_chip = Product.objects.create(
             category=self.cat_raw, internal_code='RM-CHIP-A', model_name='主控芯片 A',
             stock_quantity=Decimal('100'),
@@ -685,85 +853,135 @@ class BOMProductionOrderTest(TestCase):
         PcbPlanMaterial.objects.create(plan=self.plan, material=self.raw_cap, quantity_per_unit=Decimal('5'))
         PcbPlanMaterial.objects.create(plan=self.plan, material=self.raw_bare, quantity_per_unit=Decimal('1'))
 
-    def _make_production_order_with_line(self, quantity, no_suffix=''):
-        order = ProductionOrder.objects.create(
-            order_no=f'PRD-TEST-{quantity}{no_suffix}',
-            plan_date='2026-05-21',
-            operator='manager_test',
+        # 销售单 + 明细：客户、订单总量 100
+        self.customer = Partner.objects.create(name='排产测试客户', partner_type='CUSTOMER')
+        self.sales_order = SalesOrder.objects.create(
+            order_no='SO-PR-TEST', partner=self.customer, operator='m', total_amount=Decimal('0'),
         )
-        ProductionOrderLine.objects.create(
-            production_order=order,
-            shell=self.shell, pcb_plan=self.plan, cable=self.cable,
-            quantity=Decimal(str(quantity)),
+        self.sales_item = SalesOrderItem.objects.create(
+            order=self.sales_order,
+            product=self.shell, pcb_plan=self.plan, cable=self.cable,
+            custom_product_name='PR 测试品', price=Decimal('10'),
+            quantity=Decimal('100'),
         )
-        return order
 
-    def test_execute_deducts_shell_cable_and_expanded_materials(self):
-        """EXECUTED → 写 (2 + N) 条 PRODUCE_CONSUME，扣减 shell + cable + 方案展开的原材料。"""
-        order = self._make_production_order_with_line(10)
-        order.status = 'EXECUTED'
-        order.save()
-
-        # 应该生成 2 + 3 = 5 条 PRODUCE_CONSUME（shell + cable + 3 个原材料）
-        adjustments = StockAdjustment.objects.filter(
-            note__startswith=f'排产 {order.order_no}',
-            adjustment_type='PRODUCE_CONSUME',
+    def test_create_record_deducts_shell_cable_and_materials(self):
+        """ProductionRecord 创建即扣 (2 + N) 条 PRODUCE_CONSUME。"""
+        ProductionRecord.objects.create(
+            sales_item=self.sales_item,
+            quantity=Decimal('10'),
+            operator='warehouse_test',
         )
+
+        # 2 + 3 = 5 条
+        adjustments = StockAdjustment.objects.filter(adjustment_type='PRODUCE_CONSUME')
         self.assertEqual(adjustments.count(), 5)
 
-        # 半成品 1:1 扣减
         self.shell.refresh_from_db()
         self.cable.refresh_from_db()
-        self.assertEqual(self.shell.stock_quantity, Decimal('90'))    # 100 - 10
-        self.assertEqual(self.cable.stock_quantity, Decimal('-10'))   # 0 - 10（允许负）
-
-        # 原材料按 quantity × quantity_per_unit 扣减
         self.raw_chip.refresh_from_db()
         self.raw_cap.refresh_from_db()
         self.raw_bare.refresh_from_db()
+
+        self.assertEqual(self.shell.stock_quantity, Decimal('90'))   # 100 - 10
+        self.assertEqual(self.cable.stock_quantity, Decimal('-10'))  # 0 - 10
         self.assertEqual(self.raw_chip.stock_quantity, Decimal('90'))   # 100 - 10×1
         self.assertEqual(self.raw_cap.stock_quantity, Decimal('450'))   # 500 - 10×5
         self.assertEqual(self.raw_bare.stock_quantity, Decimal('90'))   # 100 - 10×1
 
-        # executed_at 被自动设置
-        order.refresh_from_db()
-        self.assertIsNotNone(order.executed_at)
+    def test_first_record_promotes_order_to_producing(self):
+        """首条 ProductionRecord 创建时 SalesOrder.status 自动推 ORDERED → PRODUCING。"""
+        self.assertEqual(self.sales_order.status, 'ORDERED')
 
-    def test_execute_is_idempotent(self):
-        """EXECUTED 后再 save 不应重复扣料（幂等保护）。"""
-        order = self._make_production_order_with_line(10)
-        order.status = 'EXECUTED'
-        order.save()
-
-        # 第二次 save——比如改了 note——应该没有任何新 StockAdjustment
-        before = StockAdjustment.objects.count()
-        order.note = '改了 note 一下'
-        order.save()
-        after = StockAdjustment.objects.count()
-        self.assertEqual(before, after, '重复保存 EXECUTED 单不应再写扣料条目')
-
-    def test_planned_does_not_trigger_consumption(self):
-        """PLANNED 状态保存不应触发扣料。"""
-        order = self._make_production_order_with_line(5)
-        # 默认就是 PLANNED，保存不会扣料
-        self.shell.refresh_from_db()
-        self.assertEqual(self.shell.stock_quantity, Decimal('100'))
-        self.assertIsNone(order.executed_at)
-        self.assertFalse(
-            StockAdjustment.objects.filter(adjustment_type='PRODUCE_CONSUME').exists(),
+        ProductionRecord.objects.create(
+            sales_item=self.sales_item,
+            quantity=Decimal('5'),
+            operator='m',
         )
 
+        self.sales_order.refresh_from_db()
+        self.assertEqual(self.sales_order.status, 'PRODUCING')
+
+    def test_produced_and_available_to_ship_properties(self):
+        """SalesOrderItem.produced_quantity / available_to_ship_quantity 正确。"""
+        ProductionRecord.objects.create(sales_item=self.sales_item, quantity=Decimal('30'), operator='m')
+        ProductionRecord.objects.create(sales_item=self.sales_item, quantity=Decimal('20'), operator='m')
+
+        self.sales_item.refresh_from_db()
+        self.assertEqual(self.sales_item.produced_quantity, Decimal('50'))
+        self.assertEqual(self.sales_item.shipped_quantity, 0)
+        # 可发 = min(100, 50) - 0 = 50
+        self.assertEqual(self.sales_item.available_to_ship_quantity, Decimal('50'))
+
+    def test_skip_consumption_bypasses_deduction(self):
+        """skip_consumption=True 时不扣料（仅 admin 边缘场景使用）。"""
+        ProductionRecord.objects.create(
+            sales_item=self.sales_item,
+            quantity=Decimal('10'),
+            operator='admin_test',
+            skip_consumption=True,
+        )
+
+        # 一条 PRODUCE_CONSUME 都不应该写入
+        self.assertEqual(
+            StockAdjustment.objects.filter(adjustment_type='PRODUCE_CONSUME').count(),
+            0,
+        )
+        # 但 produced_quantity 仍然算入（业务逻辑上"已生产"）
+        self.sales_item.refresh_from_db()
+        self.assertEqual(self.sales_item.produced_quantity, Decimal('10'))
+
     def test_allows_negative_stock(self):
-        """超过现有库存的排产也能正常 EXECUTED——半成品/原材料补货节奏与排产解耦。"""
-        order = self._make_production_order_with_line(200)  # > shell 的 100
-        order.status = 'EXECUTED'
-        order.save()
-        self.shell.refresh_from_db()
-        self.assertEqual(self.shell.stock_quantity, Decimal('-100'))
-        # 原材料同样可负
+        """超过现有库存可负——补货节奏与排产解耦。"""
+        ProductionRecord.objects.create(
+            sales_item=self.sales_item,
+            quantity=Decimal('100'),  # > raw_chip 的 100，> cable 的 0
+            operator='m',
+        )
+        # 注意：sales_item.quantity = 100，所以 100 不算过排产
+        self.cable.refresh_from_db()
         self.raw_chip.refresh_from_db()
-        self.assertEqual(self.raw_chip.stock_quantity, Decimal('-100'))  # 100 - 200×1
-        # 没有任何异常或拒绝
+        self.assertEqual(self.cable.stock_quantity, Decimal('-100'))  # 0 - 100
+        self.assertEqual(self.raw_chip.stock_quantity, Decimal('0'))   # 100 - 100×1
+
+    def test_api_rejects_overproduction(self):
+        """API 校验：produced + new > sales_item.quantity → 400。"""
+        Group.objects.get_or_create(name='manager')
+        manager = User.objects.create_user(username='pr_manager', password='p')
+        manager.groups.add(Group.objects.get(name='manager'))
+        client = APIClient()
+        client.force_authenticate(user=manager)
+
+        # 先排 80 套（合法）
+        resp = client.post(
+            '/api/business/production-records/',
+            {'sales_item': self.sales_item.id, 'quantity': '80'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        # 再排 30 套（合计 110 > 100）→ 400
+        resp = client.post(
+            '/api/business/production-records/',
+            {'sales_item': self.sales_item.id, 'quantity': '30'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('quantity', resp.data)
+
+    def test_api_rejects_patch_and_delete(self):
+        """append-only：ViewSet 不挂 Update/Destroy mixin → 405。"""
+        record = ProductionRecord.objects.create(
+            sales_item=self.sales_item, quantity=Decimal('10'), operator='m',
+        )
+        Group.objects.get_or_create(name='manager')
+        manager = User.objects.create_user(username='pr_manager2', password='p')
+        manager.groups.add(Group.objects.get(name='manager'))
+        client = APIClient()
+        client.force_authenticate(user=manager)
+
+        for method in ('patch', 'put', 'delete'):
+            resp = getattr(client, method)(f'/api/business/production-records/{record.id}/')
+            self.assertEqual(resp.status_code, 405, f'{method.upper()} 应返回 405')
 
 
 class PcbPlanAPITest(APITestCase):

@@ -16,6 +16,11 @@ export interface ShippingLogResponse {
   sales_item_detail?: {
     id: number;
     custom_product_name: string;
+    /**
+     * 销售明细的规格描述（商标/颜色/工艺等）。后端 SalesOrderItemSerializer
+     * 已返回此字段；发货单打印时需要展示给客户确认。
+     */
+    detail_description?: string;
     quantity: number;
     shipped_quantity: number;
     product_detail?: {

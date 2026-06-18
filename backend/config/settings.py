@@ -194,3 +194,10 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),
 }
+
+# 发货单 PDF 抬头公司名（详见 business/api/shipping_note_pdf.py）。
+# 通过环境变量配置，方便多工厂部署同一份代码。
+SHIPPING_NOTE_COMPANY_NAME = os.environ.get(
+    'SHIPPING_NOTE_COMPANY_NAME',
+    '天长市地久家用电器有限公司',
+)

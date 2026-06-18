@@ -86,20 +86,21 @@ Django Groups：`manager` / `warehouse` / `shipper`。`superuser` 视同 manager
 
 **库存调整**`stock-adjustments/` 查询参数：`product`、`adjustment_type`（`MANUAL_IN` / `MANUAL_OUT` / `PRODUCE_IN` / `PRODUCE_CONSUME`）、`operator`、`note`、`created_from`、`created_to`、`ordering`、`page`、`page_size`。`PRODUCE_CONSUME` 由排产单 EXECUTED 自动写入，前端 / admin 不要手动写。
 
-### 4.4 BOM 排产（每日扣料）
+### 4.4 BOM 排产（BOM-2.1，每次创建即扣料）
 
 | 路径 | 方法 | 权限 | 备注 |
 |---|---|---|---|
-| `production-orders/` | GET / POST | manager / warehouse / shipper | 列表 / 新建（带 `lines_payload` 嵌套写） |
-| `production-orders/{id}/` | GET / PATCH | 同上 | PATCH 仅 `PLANNED` 有效；其他状态 400 拒绝。**无 DELETE** |
-| `production-orders/{id}/execute/` | POST | 同上 | 触发扣料：状态 PLANNED → EXECUTED，signal 自动写 3N 条 `StockAdjustment(PRODUCE_CONSUME)` |
-| `production-orders/{id}/cancel/` | POST | 同上 | 仅 PLANNED → CANCELLED |
+| `production-records/` | GET / POST | manager / warehouse / shipper | POST: 必填 `sales_item` + `quantity`（创建即扣料，不可逆）|
+| `production-records/{id}/` | GET | 同上 | 详情。**无 PATCH / DELETE**（append-only） |
 
-**查询参数**：`status`（`PLANNED` / `EXECUTED` / `CANCELLED`）、`plan_date`、`plan_date_from`、`plan_date_to`、`order_no`、`ordering`、`page`、`page_size`
+**查询参数**：`sales_item`、`sales_order`、`partner`、`executed_from`、`executed_to`、`operator`、`ordering`、`page`、`page_size`
 
 **关键约束**：
-- 排产单 EXECUTED 不可逆——admin 整单只读、ViewSet 不挂 DestroyMixin、再 save 由 pre_save 钩子识别状态未变化跳过扣料。要"退料"必须由 warehouse 录入反向 `StockAdjustment(MANUAL_IN)`
-- 允许库存变负（半成品由其他车间补货）
+- ProductionRecord 创建即扣料：写 (2 + N) 条 `StockAdjustment(PRODUCE_CONSUME)`——1 条 shell + 1 条 cable + N 条 pcb_plan 展开的原材料。shell/cable/plan 全部从 `sales_item` 取
+- **过排产禁止**：`produced + new.quantity > sales_item.quantity` → 400
+- 首条 ProductionRecord 创建时信号自动推 `SalesOrder.status` ORDERED → PRODUCING
+- API 写入路径强制 `skip_consumption=False`；要"成品挪用"等边缘场景需走 admin 后台
+- 允许库存变负（补货节奏与排产解耦）
 - 一条 line 必须挂三件半成品（外壳 / 板材 / 线材）；若挂 `sales_item`，三件 FK 自动从 sales_item 同名字段回填
 - `order_no` 不传时后端自动生成 `PRD{year}-{NNNN}`
 

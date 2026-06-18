@@ -40,23 +40,23 @@ backend/
    - 新增 model 想覆写 save 必须在 PR 中说明为什么不能用 signal
 5. **append-only 事件 model**
    - `StockAdjustment` / `ReceivingLog` / `ShippingLog` / `OrderEvent` /
-     `PurchaseOrderEvent` / `ProductionOrder`（EXECUTED 后）都是**不可逆事件**——
-     它们的 `save()` 在 `is_new=True`（或状态转换时）产生副作用（调库存、推状态、
-     写台账），但**修改或删除现有记录不会回滚副作用**
-   - 这类 model 的 ViewSet **不要挂** `DestroyModelMixin`；纯只读事件再 **不挂**
-     `UpdateModelMixin`；可以挂 `RetrieveModelMixin` 让 detail GET 返回 200（这样
-     PATCH/PUT/DELETE 才真正返回 405 而不是路由级 404）。`ProductionOrder` 略特殊：
-     允许 `UpdateModelMixin` 但 serializer 在 EXECUTED/CANCELLED 状态下抛 400 拒绝编辑
-   - 对应 admin 必须重写 `has_delete_permission` 返回 False；纯只读事件还要 `has_change_permission`
-     也返回 False + 所有字段加 `readonly_fields`；半可编辑事件（如 `ProductionOrder`）
-     可在 `get_readonly_fields` 中按状态切换（参考 `ProductionOrderAdmin.get_readonly_fields`）
-   - 测试必须有一条 405 回归断言（参考 `test_stock_adjustment_is_append_only`），
-     防止未来有人不小心给 ViewSet 加 mixin 把 405 变 200
-   - 状态机型的事件（`ProductionOrder`）的"扣料"signal 必须用 `pre_save` 钩子
-     从 DB 快照旧状态做幂等保护，**不能依赖 Python 实例的字段**（实例缓存可能陈旧，
-     会被回写覆盖）。参考 `_stash_production_order_previous_status` + `execute_production_consumption`
+     `PurchaseOrderEvent` / **`ProductionRecord`**（BOM-2.1 起）都是**纯不可逆事件**——
+     它们的 `save()` 在 `created=True` 时产生副作用（调库存、推状态、写台账），
+     但**修改或删除现有记录不会回滚副作用**
+   - 这类 model 的 ViewSet **不挂** `UpdateModelMixin` / `DestroyModelMixin`，
+     可以挂 `RetrieveModelMixin` 让 detail GET 返回 200（这样 PATCH/PUT/DELETE 才真正
+     返回 405 而不是路由级 404）
+   - 对应 admin 必须重写 `has_delete_permission` 返回 False，所有字段加
+     `readonly_fields`（参考 `ProductionRecordAdmin.get_readonly_fields`）
+   - 测试必须有一条 405 回归断言（参考 `test_stock_adjustment_is_append_only`
+     与 `test_api_rejects_patch_and_delete`），防止未来有人不小心给 ViewSet 加 mixin 把 405 变 200
+   - 扣料 signal 必须用 `post_save(created=True)` 守卫——只在新建时触发副作用，
+     `update_fields` 走 save 不会重入
    - 如要"撤销"一笔事件，业务上要求**新加一笔反向类型的事件**冲销
      （会计红蓝字凭证逻辑），UI 上要显著提示这一点
+   - 历史：BOM-2.0 的 `ProductionOrder + ProductionOrderLine` 两段式状态机
+     （PLANNED → EXECUTED / CANCELLED）已在 BOM-2.1（2026-05-27）废弃，取消"状态机型事件"
+     这个特殊路径——所有事件型 model 现在都是单条创建即副作用
 6. **migration**
    - 每次 model 变更必须生成对应 migration 文件，不允许手写 SQL 或合并 squash 已 release 的 migration
    - migration 名称应包含语义（如 `0007_salesorderitem_detail_description_and_more.py`）

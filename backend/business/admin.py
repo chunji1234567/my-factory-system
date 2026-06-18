@@ -4,7 +4,7 @@ from .models import (
     SalesOrder, SalesOrderItem, ShippingLog, OrderEvent,
     PurchaseOrder, PurchaseOrderItem, ReceivingLog,
     StockAdjustment, CustomerPreferredProduct, PartnerLedgerEntry,
-    ProductionOrder, ProductionOrderLine,
+    ProductionRecord,
 )
 
 # --- 内联 (Inlines) 配置 ---
@@ -104,36 +104,29 @@ class PartnerLedgerEntryAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at',)
 
 
-# --- 排产（BOM 自动扣料）---
+# --- 排产记录（BOM-2.1：append-only 事件） ---
 
-class ProductionOrderLineInline(admin.TabularInline):
-    model = ProductionOrderLine
-    extra = 1
-    fields = ('sales_item', 'shell', 'pcb_plan', 'cable', 'quantity', 'note')
+@admin.register(ProductionRecord)
+class ProductionRecordAdmin(admin.ModelAdmin):
+    """排产记录 admin（BOM-2.1，2026-05-27）。
 
-
-@admin.register(ProductionOrder)
-class ProductionOrderAdmin(admin.ModelAdmin):
-    """排产单 admin。
-
-    PLANNED 状态可正常编辑；EXECUTED 状态下**所有字段只读**——
-    与 ``rules/backend-rules.md §1.5`` 的"事件型 model"约定一致。
-    若要"撤销"已执行的排产，业务上要求录反向 StockAdjustment(MANUAL_IN)
-    把料退回（详见 docs/PRD.md §4 排产流程）。
+    严格 **append-only**——与 ``rules/backend-rules.md §1.5`` 一致：
+    - 现有字段全部只读，禁止编辑
+    - 禁止删除（要"撤销"录反向 ``StockAdjustment(MANUAL_IN)``）
+    - **允许创建**——admin 内部场景（如"跨订单挪用已生产成品"边缘场景）
+      可以勾选 ``skip_consumption=True`` 写一条不扣料的记录。详见
+      docs/PRD.md §9.3。
     """
-    list_display = ('order_no', 'plan_date', 'status', 'operator', 'created_at', 'executed_at')
-    list_filter = ('status', 'plan_date')
-    search_fields = ('order_no', 'note')
-    readonly_fields = ('created_at', 'executed_at')
-    inlines = [ProductionOrderLineInline]
+    list_display = ('id', 'sales_item', 'quantity', 'skip_consumption', 'operator', 'executed_at')
+    list_filter = ('skip_consumption', 'executed_at')
+    search_fields = ('sales_item__custom_product_name', 'operator', 'note')
+    readonly_fields = ('executed_at',)
 
     def get_readonly_fields(self, request, obj=None):
-        ro = list(self.readonly_fields)
-        if obj is not None and obj.status != 'PLANNED':
-            # EXECUTED / CANCELLED 后整单只读
-            ro.extend(['order_no', 'plan_date', 'status', 'note', 'operator'])
-        return ro
+        if obj is None:
+            return self.readonly_fields
+        # 已存在的记录所有字段只读
+        return tuple(f.name for f in self.model._meta.get_fields() if hasattr(f, 'name'))
 
     def has_delete_permission(self, request, obj=None):
-        # 排产单是 append-only：不允许删（业务上用 cancel 或保留历史）
         return False

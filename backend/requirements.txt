@@ -8,3 +8,8 @@ djangorestframework-simplejwt==5.3.1
 django-filter==24.2
 python-dotenv==1.0.1
 dj-database-url==2.2.0
+# 发货单 PDF 生成（详见 business/api/shipping_note_pdf.py）。
+# 选 reportlab 而不是 WeasyPrint 是因为它纯 Python、无原生依赖
+# （cairo/pango），Windows/Linux/macOS 都能 pip 装上。
+# 中文用 STSong-Light CID 字体，不需要额外打包 TTF。
+reportlab==4.2.5

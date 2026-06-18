@@ -1,28 +1,65 @@
-import { Fragment, useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { api } from '../../api/client';
-import FilterBar from '../common/FilterBar';
-import {PartnerSelect} from '../common/PartnerSelect';
-import StatusBadge from '../common/StatusBadge';
+import { PartnerSelect } from '../common/PartnerSelect';
 import OrderDetailsView from '../common/OrderDetailsView';
-import  {OrderItemsEditor}  from '../common/OrderItemsEditor';
+import { OrderItemsEditor } from '../common/OrderItemsEditor';
 import type { OrderItemDraft } from '../common/OrderItemsEditor';
 import Modal from '../common/Modal';
 import Pagination from '../common/Pagination';
 import { resolvePartnerId, formatPartner } from '../../utils/orderUtils';
-import NavbarButton from '../common/NavbarButton';
 import { useSalesOrders, SalesOrdersFilters } from '../../hooks/useSalesOrders';
 import { useCustomerPreferredProducts } from '../../hooks/useCustomerPreferredProducts';
 import { usePcbPlans } from '../../hooks/usePcbPlans';
+import {
+  Card,
+  PageHeader,
+  Section,
+  DueDatePill,
+  StatusPillFilterRow,
+  OrderListRow,
+  ModalFooterButtons,
+} from '../primitives';
 
-// 1. 常量定义 - 销售状态
-const SALES_STATUS_OPTIONS = [
+/**
+ * 销售管理（Stage C-3 redesign，2026-06-18）。
+ *
+ * 重做要点（详见 docs/ux-audit.md §2.3）：
+ *   1. PageHeader 替换自造 h2 + 英文副标题
+ *   2. 筛选区从下拉改成顶部 Pill row（状态）+ PartnerSelect（客户）
+ *   3. 列表行用响应式 Card（一套渲染，丢掉桌面/移动双重 JSX）
+ *   4. 状态用 Pill primitive，金额用 formatMoney（千分位 + 无空格）
+ *   5. 列表行右上角加 DueDatePill（销售订单交期）
+ *   6. 列表行的「记录动态」按钮**折叠**到行展开的事件流末尾（OrderDetailsView 的
+ *      "+ 添加业务动态" 大入口）——视觉负担减半
+ *   7. 创建/编辑 Modal 用 Section 分两段：① 客户与交期 ② 订单明细
+ *   8. 顺带：交期字段、价格可选、明细复用上一条等交互打磨（详见 OrderItemsEditor）
+ *
+ * 与后端的契约：
+ *   - 编辑订单**不带 status**——状态推进必须走 api.updateSalesOrderStatus
+ *     （详见 rules/frontend-rules.md §2.2 与 docs/PRD.md §9.2 changelog 2026-05-21）。
+ *   - expected_delivery_date 走通用 PATCH，可空。
+ */
+
+const PAGE_SIZE = 30;
+
+/** 顶部状态 Pill 筛选行的选项；"全部"由 StatusPillFilterRow 自动加，不需要在这里列。 */
+const STATUS_FILTERS = [
   { value: 'ORDERED', label: '待处理' },
   { value: 'PRODUCING', label: '生产中' },
   { value: 'SHIPPED', label: '已发货' },
   { value: 'COMPLETED', label: '已完成' },
-];
+] as const;
 
-const PAGE_SIZE = 30;
+/** 列表行状态 → Pill tone + 中文 label。 */
+const STATUS_PILL: Record<
+  string,
+  { label: string; tone: 'default' | 'warning' | 'accent' | 'success' }
+> = {
+  ORDERED: { label: '待处理', tone: 'default' },
+  PRODUCING: { label: '生产中', tone: 'warning' },
+  SHIPPED: { label: '已发货', tone: 'accent' },
+  COMPLETED: { label: '已完成', tone: 'success' },
+};
 
 interface SalesOrdersPanelProps {
   products: any[];
@@ -32,13 +69,22 @@ interface SalesOrdersPanelProps {
   canCreateEvents: boolean;
 }
 
-// UI 层的"输入框/datalist 层"过滤态——customerInput 与 customerId 是 PartnerSelect
-// 解析出来的"显示值 + 解析 ID"。提交到后端时只用 partner（ID 优先）或 partner_name。
+// PartnerSelect 的"显示值 + 解析 ID"。提交到后端时只用 partner（ID）或 partner_name。
 interface PanelFiltersState {
   status: string;
   customerInput: string;
   customerId: number | null;
 }
+
+interface OrderFormState {
+  customerField: string;
+  customerId: number | null;
+  /** ISO "YYYY-MM-DD" 或空串。后端可接受 null。 */
+  expectedDeliveryDate: string;
+  items: OrderItemDraft[];
+}
+
+const FIELD_LABEL_CLS = 'text-micro font-bold text-ink-faint uppercase tracking-wider ml-0.5';
 
 export default function SalesOrdersPanel({
   products,
@@ -47,35 +93,36 @@ export default function SalesOrdersPanel({
   categories,
   canCreateEvents,
 }: SalesOrdersPanelProps) {
-  // --- 状态管理 ---
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const [modal, setModal] = useState<{ open: boolean; mode: 'create' | 'edit'; draftId: number | null }>({
-    open: false, mode: 'create', draftId: null
-  });
-  // 创建/编辑表单状态：注意**不含 status**——
-  //   创建：后端默认 ORDERED；
-  //   编辑：状态推进走 api.updateSalesOrderStatus，**不**经此表单（详见
-  //   rules/frontend-rules.md §2.2 与 docs/PRD.md §9.2 changelog 2026-05-21）。
-  const [form, setForm] = useState({ customerField: '', customerId: null as number | null, items: [] as OrderItemDraft[] });
-  const [isSaving, setIsSaving] = useState(false);
-  const [eventModal, setEventModal] = useState({ open: false, orderId: null as number | null, content: '' });
+  const [modal, setModal] = useState<{
+    open: boolean;
+    mode: 'create' | 'edit';
+    draftId: number | null;
+  }>({ open: false, mode: 'create', draftId: null });
 
-  // --- 筛选 + 分页：本地 UI 态 → 转 hook options（server-side filter + pagination） ---
+  const [form, setForm] = useState<OrderFormState>({
+    customerField: '',
+    customerId: null,
+    expectedDeliveryDate: '',
+    items: [],
+  });
+  const [isSaving, setIsSaving] = useState(false);
+  const [eventModal, setEventModal] = useState({
+    open: false,
+    orderId: null as number | null,
+    content: '',
+  });
+
+  // --- 筛选 + 分页：UI 态 → SalesOrdersFilters ---
   const [panelFilters, setPanelFilters] = useState<PanelFiltersState>({
     status: '',
     customerInput: '',
     customerId: null,
   });
   const [page, setPage] = useState(1);
+  useEffect(() => setPage(1), [panelFilters]);
 
-  // 切换筛选条件时回到第 1 页（与 usePaginatedFilter 原有行为一致）。
-  useEffect(() => {
-    setPage(1);
-  }, [panelFilters]);
-
-  // 把 panel 内的"显示值"过滤态翻译成后端能识别的 SalesOrdersFilters。
-  // 优先用 customerId（精确匹配）；没有 ID 时退化为 partner_name 模糊匹配。
   const apiFilters = useMemo<SalesOrdersFilters>(() => {
     const next: SalesOrdersFilters = {};
     if (panelFilters.status) next.status = panelFilters.status;
@@ -97,31 +144,29 @@ export default function SalesOrdersPanel({
   const totalCount = ordersQuery.pagination.totalCount;
   const onRefresh = ordersQuery.reload;
 
-  // --- 数据处理 (useMemo) ---
-  // 客户范围：CUSTOMER 与 BOTH（双重身份）都允许下销售单，
-  // 与后端 SalesOrder.partner 的 limit_choices_to 同口径。
-  const customerOptions = useMemo(() =>
-    partners.filter((p: any) => p.partner_type === 'CUSTOMER' || p.partner_type === 'BOTH'),
-  [partners]);
+  const customerOptions = useMemo(
+    () => partners.filter((p: any) => p.partner_type === 'CUSTOMER' || p.partner_type === 'BOTH'),
+    [partners],
+  );
 
-  const categoryOptions = useMemo(() =>
-    (categories || []).map((c: any) => ({ value: String(c.id), label: c.name })),
-  [categories]);
+  const categoryOptions = useMemo(
+    () => (categories || []).map((c: any) => ({ value: String(c.id), label: c.name })),
+    [categories],
+  );
 
-  const resetFilters = () => {
+  const resetFilters = () =>
     setPanelFilters({ status: '', customerInput: '', customerId: null });
-  };
 
   const preferredProducts = useCustomerPreferredProducts(form.customerId, Boolean(form.customerId));
 
-  // BOM-2.0：销售明细第二件 = PCB 方案。仅在 modal 打开时取，且只显示启用方案。
+  // 销售明细第二件 = PCB 方案。仅在 modal 打开时取，且只显示启用方案。
   const pcbPlans = usePcbPlans({
     enabled: isManager && modal.open,
     filters: { is_active: true },
     pageSize: 100,
   });
 
-  // --- 业务逻辑 ---
+  // --- 业务动作 ---
   const handleAddEvent = (orderId: number) => {
     setEventModal({ open: true, orderId, content: '' });
   };
@@ -132,28 +177,34 @@ export default function SalesOrdersPanel({
       setIsSaving(true);
       await api.createSalesOrderEvent(eventModal.orderId, {
         event_type: 'REMARK',
-        content: eventModal.content.trim()
+        content: eventModal.content.trim(),
       });
       setEventModal({ ...eventModal, open: false });
       onRefresh();
     } catch (err: any) {
-      alert("保存失败: " + err.message);
+      alert('保存失败: ' + err.message);
     } finally {
       setIsSaving(false);
     }
   };
 
   const openCreate = () => {
-    // BOM 改造：销售明细初始化为外壳/板材/线材三个空槽位（详见 docs/PRD.md §3.2）
     setForm({
       customerField: '',
       customerId: null,
-      items: [{
-        id: null,
-        product: '', pcbPlan: '', cable: '',
-        price: '', quantity: '',
-        customName: '', detailDescription: '',
-      }],
+      expectedDeliveryDate: '',
+      items: [
+        {
+          id: null,
+          product: '',
+          pcbPlan: '',
+          cable: '',
+          price: '',
+          quantity: '',
+          customName: '',
+          detailDescription: '',
+        },
+      ],
     });
     setModal({ open: true, mode: 'create', draftId: null });
   };
@@ -162,13 +213,13 @@ export default function SalesOrdersPanel({
     setForm({
       customerField: formatPartner(order.partner_name, order.partner),
       customerId: Number(order.partner) || null,
+      expectedDeliveryDate: order.expected_delivery_date || '',
       items: order.items.map((i: any) => ({
         id: i.id,
-        // BOM-2.0：三件 = 外壳(product) + PCB 方案(pcbPlan) + 线材(cable)
         product: i.product ? String(i.product) : '',
         pcbPlan: i.pcb_plan ? String(i.pcb_plan) : '',
         cable: i.cable ? String(i.cable) : '',
-        price: String(i.price),
+        price: i.price !== null && i.price !== undefined ? String(i.price) : '',
         quantity: String(i.quantity),
         customName: i.custom_product_name || '',
         detailDescription: i.detail_description || '',
@@ -179,48 +230,54 @@ export default function SalesOrdersPanel({
 
   const handleSubmit = async () => {
     const cId = form.customerId ?? resolvePartnerId(form.customerField, customerOptions);
-    if (!cId) return alert("请选择有效的客户");
+    if (!cId) return alert('请选择有效的客户');
 
-    // BOM-2.0：销售明细必须挂三件（外壳 / PCB 方案 / 线材）才有效；
-    // 后端 serializer 也会校验，前端先做友好提示避免直接 400。
-    const validItems = form.items.filter(item =>
-      item.product && item.pcbPlan && item.cable && Number(item.quantity) > 0,
+    // BOM-2.0：销售明细必须挂三件；价格可选（数量必填且 > 0）。
+    const validItems = form.items.filter(
+      (item) => item.product && item.pcbPlan && item.cable && Number(item.quantity) > 0,
     );
     if (validItems.length === 0) {
-      return alert("订单明细不能为空，且每条必须选齐外壳 + PCB 方案 + 线材，并填写数量");
+      return alert('订单明细不能为空，且每条必须选齐外壳 + PCB 方案 + 线材，并填写数量');
     }
 
     try {
       setIsSaving(true);
-      // 公共 payload：编辑销售单时**不传 status**——后端通用 PATCH
-      // 不走状态机校验（仅 /sales-orders/{id}/status/ 才走），所以
-      // 通用 PATCH 带 status 会绕开「仅前进一档」约束。状态推进必须
-      // 走 api.updateSalesOrderStatus。详见 rules/frontend-rules.md §2.2、
-      // docs/PRD.md §9.2 changelog 2026-05-21（原 §9.2 #19 修复）。
-      const itemsPayload = validItems.map(i => ({
+      const itemsPayload = validItems.map((i) => ({
         id: i.id || undefined,
-        product: Number(i.product),     // 外壳（沿用历史字段名）
-        pcb_plan: Number(i.pcbPlan),    // PCB 方案（BOM-2.0 起替换 board）
+        product: Number(i.product),
+        pcb_plan: Number(i.pcbPlan),
         cable: Number(i.cable),
-        price: Number(i.price), quantity: Number(i.quantity),
-        custom_product_name: i.customName, detail_description: i.detailDescription,
+        // 价格可空：用户没填时不应当被静默写成 0（金额脱敏边界）。
+        // 后端 SalesOrderItem.price 默认 0，前端不传 = 跟默认值一致。
+        price: i.price.trim() === '' ? 0 : Number(i.price),
+        quantity: Number(i.quantity),
+        custom_product_name: i.customName,
+        detail_description: i.detailDescription,
       }));
+
+      // expected_delivery_date：空串转 null（后端 DateField 可空）。
+      const expected = form.expectedDeliveryDate.trim() || null;
+
       if (modal.mode === 'create') {
-        // 创建走 POST：后端默认 status='ORDERED'，前端不传——
-        // api.createSalesOrder 的类型签名本就不含 status 字段。
-        await api.createSalesOrder({ partner: cId, items_payload: itemsPayload });
+        await api.createSalesOrder({
+          partner: cId,
+          items_payload: itemsPayload,
+          expected_delivery_date: expected,
+        });
       } else {
-        // 编辑走通用 PATCH：**禁止携带 status**——通用 PATCH 不走状态机
-        // 校验，会绕开「仅前进一档」约束。状态推进必须走
-        // api.updateSalesOrderStatus（详见 rules/frontend-rules.md §2.2）。
-        await api.updateSalesOrder(modal.draftId!, { partner: cId, items_payload: itemsPayload });
+        // 编辑走通用 PATCH，**禁止携带 status**——状态推进走专用 endpoint。
+        await api.updateSalesOrder(modal.draftId!, {
+          partner: cId,
+          items_payload: itemsPayload,
+          expected_delivery_date: expected,
+        });
       }
+
+      // 客户偏好产品同步（仅写新增的 name）
       if (form.customerId) {
         const existingNames = new Set(
           (preferredProducts.data || []).map((p) => p.name.trim().toLowerCase()),
         );
-        // 分两步走，避免单条 filter 里二次访问 name 时 TS 守卫失效：
-        // 先把可能 undefined 的 customName 收成 string[]，再排除已存在的名字。
         const trimmedNames: string[] = validItems
           .map((i) => (i.customName ?? '').trim())
           .filter((s): s is string => s.length > 0);
@@ -229,170 +286,209 @@ export default function SalesOrdersPanel({
         );
         if (newNames.length) {
           await Promise.all(
-            newNames.map((name) => api.createCustomerPreferredProduct({ partner: form.customerId!, name })),
+            newNames.map((name) =>
+              api.createCustomerPreferredProduct({ partner: form.customerId!, name }),
+            ),
           );
           preferredProducts.reload();
         }
       }
       setModal({ ...modal, open: false });
       onRefresh();
-    } catch (e: any) { alert(e.message); } finally { setIsSaving(false); }
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
-      {/* A. 标题区 */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">销售管理</h2>
-          <p className="text-xs text-slate-400 mt-1 uppercase font-bold tracking-widest">Outbound Sales & Orders</p>
-        </div>
-        {isManager && (
-          <button onClick={openCreate} className="rounded-full bg-slate-900 px-6 py-2 text-sm font-bold text-white shadow-lg active:scale-95 transition-all">
-            + 新建销售单
-          </button>
-        )}
-      </div>
+    <div className="space-y-section-gap animate-in fade-in duration-500 pb-20">
+      <PageHeader
+        title="销售管理"
+        description="按客户查看销售订单与明细"
+        actions={
+          isManager && (
+            <button
+              onClick={openCreate}
+              className="rounded-pill bg-primary text-on-primary px-5 py-2 text-caption font-bold
+                         hover:bg-primary-hover active:scale-95 transition-all shadow-card"
+            >
+              + 新建销售单
+            </button>
+          )
+        }
+      />
 
-      {/* B. 筛选区 */}
-      <FilterBar actions={
-        <NavbarButton variant="outline" className="text-xs" onClick={resetFilters}>
-          重置筛选
-        </NavbarButton>
-      }>
-        <FilterBar.Field label="客户名称 / #ID">
-          <PartnerSelect 
-            id="sales-filter" partners={customerOptions} value={panelFilters.customerInput}
-            onChange={(val, id) => setPanelFilters(prev => ({ ...prev, customerInput: val, customerId: id }))}
+      {/* 筛选区：客户搜索 + 状态 Pill row */}
+      <Card flat tone="subtle" padding="tight">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="flex-1 max-w-md">
+            <PartnerSelect
+              id="sales-filter"
+              partners={customerOptions}
+              value={panelFilters.customerInput}
+              onChange={(val, id) =>
+                setPanelFilters((prev) => ({
+                  ...prev,
+                  customerInput: val,
+                  customerId: id ?? null,
+                }))
+              }
+            />
+          </div>
+          <StatusPillFilterRow
+            options={STATUS_FILTERS}
+            value={panelFilters.status}
+            onChange={(status) => setPanelFilters((prev) => ({ ...prev, status }))}
+            onReset={panelFilters.customerInput || panelFilters.status ? resetFilters : undefined}
           />
-        </FilterBar.Field>
-        <FilterBar.Field label="订单状态">
-          <select className="w-full rounded-full border border-slate-200 px-4 py-2 text-sm bg-white outline-none focus:border-slate-900" value={panelFilters.status} onChange={e => setPanelFilters(prev => ({ ...prev, status: e.target.value }))}>
-            <option value="">全部显示</option>
-            {SALES_STATUS_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-          </select>
-        </FilterBar.Field>
-      </FilterBar>
-
-      {/* C. 列表区 (响应式) */}
-      <div className="bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden">
-        {/* 桌面端表格 - 按照你的标准统一字号 */}
-        <table className="hidden md:table min-w-full text-sm">
-          <thead className="bg-slate-50/50 text-slate-500 uppercase text-[15px] font-bold tracking-widest">
-            <tr>
-              <th className="px-6 py-4 text-left">客户信息 / 销售单号</th>
-              <th className="px-6 py-4 text-center">当前状态</th>
-              <th className="px-4 py-4 text-right">结算金额</th>
-              <th className="px-6 py-4 text-right">管理</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-50">
-            {pagedOrders.map(order => (
-              <Fragment key={order.id}>
-                <tr className={`hover:bg-slate-50/50 cursor-pointer transition-colors ${expandedId === order.id ? 'bg-slate-50/80' : ''}`} onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}>
-                  <td className="px-6 py-4">
-                    <p className="font-bold text-slate-800">{order.partner_name || `客户#${order.partner}`}</p>
-                    <p className="text-[15px] font-mono text-slate-400">{order.order_no}</p>
-                  </td>
-                  <td className="px-6 py-4 text-center"><StatusBadge kind="sales" status={order.status} /></td>
-                  <td className="px-4 py-4 text-right font-bold text-slate-900">¥ {Number(order.total_amount).toFixed(2)}</td>
-                  <td className="px-6 py-4 text-right flex justify-end gap-2">
-                    {canCreateEvents && (
-                      <NavbarButton variant="outline" onClick={(e) => { e.stopPropagation(); handleAddEvent(order.id); }} className="text-[10px] py-1 px-3">记录动态</NavbarButton>
-                    )}
-                    <NavbarButton variant="outline" onClick={(e) => { e.stopPropagation(); openEdit(order); }} className="text-[10px] py-1 px-3">编辑订单</NavbarButton>
-                  </td>
-                </tr>
-                {expandedId === order.id && (
-                  <tr>
-                    <td colSpan={4} className="p-0 border-b border-slate-100">
-                      <OrderDetailsView mode="sales" items={order.items} events={order.events || []} orderId={order.id} onAddEvent={handleAddEvent} />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
-
-        {/* 移动端卡片 */}
-        <div className="md:hidden divide-y divide-slate-50">
-          {pagedOrders.map(order => (
-            <div key={order.id} className="flex flex-col">
-              <div className={`p-5 active:bg-slate-100 ${expandedId === order.id ? 'bg-slate-50' : ''}`} onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}>
-                <div className="flex justify-between items-start mb-3">
-                  <div>
-                    <p className="text-sm font-bold text-slate-900">{order.partner_name}</p>
-                    <p className="text-[10px] font-mono text-slate-400 uppercase">{order.order_no}</p>
-                  </div>
-                  <StatusBadge kind="sales" status={order.status} />
-                </div>
-                <div className="flex justify-between items-end">
-                  <div className="flex gap-2">
-                    <NavbarButton variant="outline" onClick={(e) => { e.stopPropagation(); openEdit(order); }} className="text-[10px] py-1 px-3">修改</NavbarButton>
-                    {canCreateEvents && (
-                      <NavbarButton variant="outline" onClick={(e) => { e.stopPropagation(); handleAddEvent(order.id); }} className="text-[10px] py-1 px-3">记录</NavbarButton>
-                    )}
-                  </div>
-                  <p className="text-lg font-black text-slate-900">¥ {Number(order.total_amount).toFixed(2)}</p>
-                </div>
-              </div>
-              {expandedId === order.id && (
-                <div className="border-t border-slate-100">
-                  <OrderDetailsView mode="sales" items={order.items} events={order.events || []} orderId={order.id} onAddEvent={handleAddEvent} />
-                </div>
-              )}
-            </div>
-          ))}
         </div>
-      </div>
+      </Card>
 
-      {/* D. 弹窗区 */}
-      <Modal 
-        open={modal.open} onClose={() => setModal({ ...modal, open: false })}
-        title={modal.mode === 'create' ? '创建销售单' : '修改销售信息'} maxWidth="max-w-5xl"
-        footer={<NavbarButton disabled={isSaving} onClick={handleSubmit} className="px-10">{isSaving ? '提交中...' : '确认发布销售单'}</NavbarButton>}
+      {/* 列表 */}
+      {ordersQuery.loading ? (
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-8">加载中...</p>
+        </Card>
+      ) : ordersQuery.error ? (
+        <Card tone="danger" padding="tight">
+          <p className="text-caption text-danger-ink">⚠ {ordersQuery.error}</p>
+        </Card>
+      ) : pagedOrders.length === 0 ? (
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-10">
+            没有匹配的销售订单
+          </p>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {pagedOrders.map((order) => {
+            const expanded = expandedId === order.id;
+            const statusInfo =
+              STATUS_PILL[order.status] ?? { label: order.status, tone: 'default' as const };
+            return (
+              <OrderListRow
+                key={order.id}
+                title={order.partner_name || `客户#${order.partner}`}
+                subtitle={order.order_no}
+                dueDate={order.expected_delivery_date}
+                statusLabel={statusInfo.label}
+                statusTone={statusInfo.tone}
+                amount={order.total_amount}
+                canEdit={isManager}
+                onEdit={() => openEdit(order)}
+                expanded={expanded}
+                onToggleExpand={() => setExpandedId(expanded ? null : order.id)}
+                expandedContent={
+                  <OrderDetailsView
+                    mode="sales"
+                    items={order.items}
+                    events={order.events || []}
+                    orderId={order.id}
+                    onAddEvent={handleAddEvent}
+                    canAddEvent={canCreateEvents}
+                  />
+                }
+              />
+            );
+          })}
+        </div>
+      )}
+
+      <Pagination page={page} total={totalCount} onPageChange={setPage} />
+
+      {/* 创建/编辑 Modal */}
+      <Modal
+        open={modal.open}
+        onClose={() => setModal({ ...modal, open: false })}
+        title={modal.mode === 'create' ? '创建销售单' : '修改销售单'}
+        maxWidth="max-w-5xl"
+        footer={
+          <ModalFooterButtons
+            onCancel={() => setModal({ ...modal, open: false })}
+            onSubmit={handleSubmit}
+            isSaving={isSaving}
+          />
+        }
       >
-        <div className="space-y-8 py-2">
-          <PartnerSelect label="选择下单客户" id="modal-customer" partners={customerOptions} value={form.customerField} onChange={(val, id) => setForm({ ...form, customerField: val, customerId: id ?? null })} />
-          <OrderItemsEditor
-            mode="sales"
-            items={form.items}
-            products={products}
-            categoryOptions={categoryOptions}
-            pcbPlans={pcbPlans.data || []}
-            preferredModelOptions={(preferredProducts.data || []).map((p) => p.name)}
-            onChange={(newItems) => setForm({ ...form, items: newItems })}
-          />
+        <div className="space-y-section-gap">
+          <Section title="① 客户与交期">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-2 space-y-1">
+                <span className={FIELD_LABEL_CLS}>客户</span>
+                <PartnerSelect
+                  id="modal-customer"
+                  partners={customerOptions}
+                  value={form.customerField}
+                  onChange={(val, id) =>
+                    setForm({ ...form, customerField: val, customerId: id ?? null })
+                  }
+                />
+              </div>
+              <div className="space-y-1">
+                <span className={FIELD_LABEL_CLS}>预计交付日期（可选）</span>
+                <input
+                  type="date"
+                  value={form.expectedDeliveryDate}
+                  onChange={(e) =>
+                    setForm({ ...form, expectedDeliveryDate: e.target.value })
+                  }
+                  className="w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none
+                             focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors"
+                />
+                {form.expectedDeliveryDate && (
+                  <div className="pt-1">
+                    <DueDatePill date={form.expectedDeliveryDate} prefix="距交付" />
+                  </div>
+                )}
+              </div>
+            </div>
+          </Section>
+          <Section title="② 订单明细">
+            <OrderItemsEditor
+              mode="sales"
+              items={form.items}
+              products={products}
+              categoryOptions={categoryOptions}
+              pcbPlans={pcbPlans.data || []}
+              preferredModelOptions={(preferredProducts.data || []).map((p) => p.name)}
+              onChange={(newItems) => setForm({ ...form, items: newItems })}
+            />
+          </Section>
         </div>
       </Modal>
 
-      {/* E. 记录动态专用小弹窗 */}
-      <Modal 
-        open={eventModal.open} 
+      {/* 添加业务动态 Modal */}
+      <Modal
+        open={eventModal.open}
         onClose={() => setEventModal({ ...eventModal, open: false })}
         title="添加业务动态"
         maxWidth="max-w-md"
         footer={
-          <div className="flex gap-3 w-full">
-            <NavbarButton variant="outline" className="flex-1" onClick={() => setEventModal({ ...eventModal, open: false })}>取消</NavbarButton>
-            <NavbarButton className="flex-1" disabled={isSaving || !eventModal.content.trim()} onClick={submitEvent}>
-              {isSaving ? '保存中...' : '确认记录'}
-            </NavbarButton>
-          </div>
+          <ModalFooterButtons
+            onCancel={() => setEventModal({ ...eventModal, open: false })}
+            onSubmit={submitEvent}
+            isSaving={isSaving}
+            submitDisabled={!eventModal.content.trim()}
+            submitLabel="确认记录"
+            savingLabel="保存中..."
+          />
         }
       >
         <div className="space-y-4">
-          <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
-            <p className="text-sm text-blue-800 leading-relaxed">
-              <strong>提示：</strong> 此记录将同步至订单时间线，方便记录客户反馈、生产进度或发货详情。
+          <Card flat tone="accent" padding="tight">
+            <p className="text-caption text-accent-ink leading-relaxed">
+              此记录将同步至订单时间线，方便记录客户反馈、生产进度或发货详情。
             </p>
-          </div>
-          <div className="flex flex-col gap-2">
-            <label className="text-sm font-bold text-slate-500 ml-1 uppercase tracking-widest">动态内容</label>
-            <textarea 
-              autoFocus rows={4}
-              className="w-full rounded-2xl border border-slate-200 p-4 text-base focus:ring-4 focus:ring-slate-900/5 focus:border-slate-900 outline-none transition-all resize-none"
+          </Card>
+          <div className="space-y-1">
+            <span className={FIELD_LABEL_CLS}>动态内容</span>
+            <textarea
+              autoFocus
+              rows={4}
+              className="w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none
+                         focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors resize-none"
               placeholder="例如：已安排车间生产，预计后天可发货..."
               value={eventModal.content}
               onChange={(e) => setEventModal({ ...eventModal, content: e.target.value })}
@@ -400,8 +496,6 @@ export default function SalesOrdersPanel({
           </div>
         </div>
       </Modal>
-
-        <Pagination page={page} total={totalCount} onPageChange={setPage} />
     </div>
   );
 }

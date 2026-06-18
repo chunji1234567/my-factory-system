@@ -18,6 +18,7 @@ from business.models import (
     SalesOrderItem,
     ShippingLog,
     OrderEvent,
+    ProductionRecord,
 )
 
 User = get_user_model()
@@ -52,6 +53,12 @@ WAREHOUSE_PERMISSIONS: Sequence[PermissionSpec] = (
     PermissionSpec(ReceivingLog, ('view', 'add')),
     PermissionSpec(StockAdjustment, ('view', 'add')),
     PermissionSpec(Partner, ('view',)),
+    # 2026-06-18：warehouse 也参与排产（详见 docs/PRD.md §4.5）。
+    # 排产基于销售明细打平，所以需要 view 销售订单 / 销售明细。
+    # ProductionRecord 是 append-only：只能 view + add，不能 change/delete。
+    PermissionSpec(SalesOrder, ('view',)),
+    PermissionSpec(SalesOrderItem, ('view',)),
+    PermissionSpec(ProductionRecord, ('view', 'add')),
 )
 
 SHIPPER_PERMISSIONS: Sequence[PermissionSpec] = (
@@ -60,6 +67,8 @@ SHIPPER_PERMISSIONS: Sequence[PermissionSpec] = (
     PermissionSpec(ShippingLog, ('view', 'add')),
     PermissionSpec(OrderEvent, ('view',)),
     PermissionSpec(Partner, ('view',)),
+    # 2026-06-18：shipper 也可排产（PRD §4.5 三角色共同维护排产记录）。
+    PermissionSpec(ProductionRecord, ('view', 'add')),
 )
 
 ROLE_DEFINITIONS: Sequence[RoleDefinition] = (

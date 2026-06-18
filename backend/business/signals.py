@@ -29,7 +29,7 @@ from django.dispatch import receiver
 from .models import (
     FinancialTransaction,
     PartnerLedgerEntry,
-    ProductionOrder,
+    ProductionRecord,
     PurchaseOrder,
     PurchaseOrderItem,
     ReceivingLog,
@@ -205,106 +205,104 @@ def auto_update_purchase_status(sender, instance, **kwargs):
     order.save()
 
 
-# --- 3. 排产扣料 ---
+# --- 3. 排产扣料（BOM-2.1：append-only ProductionRecord 创建即扣料） ---
 
 
-@receiver(pre_save, sender=ProductionOrder)
-def _stash_production_order_previous_status(sender, instance, **kwargs):
-    """在 save 前快照 DB 里的旧 status，供 post_save 判断是否真的发生了状态转换。
+@receiver(post_save, sender=ProductionRecord)
+def auto_consume_on_production_record_create(sender, instance, created, **kwargs):
+    """``ProductionRecord`` **创建时**扣料。BOM-2.1 重设计（2026-05-27）。
 
-    必须用 pre_save 拿 DB 真值——不能依赖 Python 实例属性，因为调用方
-    （包括 admin / API / 业务代码）可能在内存里改完 status 后又改别的字段，
-    Python 对象上的 status 会"看起来"是新值，但其实第一次保存时已经写入 DB
-    的状态变化才是事实。
+    对每条新记录写 **(2 + N) 条** ``StockAdjustment(PRODUCE_CONSUME)``：
+      - 1 条扣 ``sales_item.product``（外壳半成品，instance.quantity 个）
+      - 1 条扣 ``sales_item.cable``（线材半成品，instance.quantity 个）
+      - N 条扣 ``sales_item.pcb_plan.materials`` 展开的原材料；每条数量 =
+        ``instance.quantity * material.quantity_per_unit``
+
+    三件物料全部从 ``sales_item`` 读，不在 ProductionRecord 上独立存储——
+    单一真相来源，避免数据漂移。
+
+    **append-only**：post_save 只在 ``created=True`` 时触发（理论上 PATCH 也
+    走 post_save，但 ViewSet 已禁止 update，serializer 层也无 update 路径，
+    所以这里只是双保险）。
+
+    **skip_consumption=True**：跳过扣料——admin 内部用于"跨订单挪用已生产
+    成品"等边缘场景（详见 docs/PRD.md §9.3）。
+
+    业务语义：SMT 加工商按方案领料贴片送回 + 自家工坊装配——这三步在系统里
+    合并为一个原子动作。允许库存变负（补货节奏与排产解耦）。
+
+    详见 docs/PRD.md §3.2 / §4.5 / §9.4 changelog 2026-05-27（BOM-2.1）。
     """
-    if instance.pk is None:
-        instance._previous_status = None
+    if not created:
         return
-    try:
-        prev = ProductionOrder.objects.only('status').get(pk=instance.pk)
-        instance._previous_status = prev.status
-    except ProductionOrder.DoesNotExist:
-        instance._previous_status = None
-
-
-@receiver(post_save, sender=ProductionOrder)
-def execute_production_consumption(sender, instance, **kwargs):
-    """``ProductionOrder`` 由 PLANNED 转 EXECUTED 时统一扣料（BOM-2.0）。
-
-    对每条 line 各写 **(2 + N) 条** ``StockAdjustment(PRODUCE_CONSUME)``：
-      - 1 条扣 ``shell``（外壳半成品，line.quantity 个）
-      - 1 条扣 ``cable``（线材半成品，line.quantity 个）
-      - N 条扣 ``pcb_plan.materials`` 展开的原材料；每条数量 =
-        ``line.quantity * material.quantity_per_unit``
-
-    业务语义：SMT 加工商按方案领料贴片，板子送回直接进装配——系统**不跟踪
-    中间板材库存**，只在排产 EXECUTED 时一次性扣减"原材料 + 外壳 + 线材"。
-    详见 docs/PRD.md §3.2 / §4.5 / §9.4 changelog 2026-05-21（PCB 方案改造）。
-
-    每条 StockAdjustment 自己的 ``save()`` 原子地调 Product.stock_quantity 并写
-    StockLog，与现有库存维护链路一致。允许库存变负（半成品 / 原材料的补货
-    节奏与排产解耦，业务上"先排再补料"是常态）。
-
-    **幂等保护**：依赖 ``_previous_status``（由 pre_save 钩子设置）——只有当
-    本次 save 把 status **从非 EXECUTED 转到 EXECUTED** 时才扣料。
-    后续对同一单的任何 save（改 note、回写 executed_at）都不会再进入扣料
-    逻辑——即使 Python 实例缓存陈旧也无所谓，看的是真实状态变化。
-    """
-    if instance.status != 'EXECUTED':
+    if instance.skip_consumption:
         return
-    prev_status = getattr(instance, '_previous_status', None)
-    if prev_status == 'EXECUTED':
-        # 本次 save 时 DB 里已经是 EXECUTED——说明状态没变化，跳过。
-        return
-
-    from django.utils import timezone
 
     with transaction.atomic():
-        # 锁定本订单防并发重入
-        order = ProductionOrder.objects.select_for_update().get(pk=instance.pk)
+        item = (
+            SalesOrderItem.objects
+            .select_related('product', 'cable', 'pcb_plan')
+            .prefetch_related('pcb_plan__materials__material')
+            .get(pk=instance.sales_item_id)
+        )
+        qty = instance.quantity
+        note_prefix = f'排产 #{instance.id} SO-item {item.id}'
 
-        # prefetch_related 减少 N+1：每条 line 都会展开方案明细
-        lines = order.lines.select_related(
-            'shell', 'cable', 'pcb_plan',
-        ).prefetch_related('pcb_plan__materials__material').all()
-
-        for line in lines:
-            qty = line.quantity
-            note_prefix = f'排产 {order.order_no}'
-
-            # (1) 外壳：1 条
+        # (1) 外壳：1 条
+        if item.product is not None:
             StockAdjustment.objects.create(
-                product=line.shell,
+                product=item.product,
                 adjustment_type='PRODUCE_CONSUME',
                 quantity=qty,
                 note=f'{note_prefix} 消耗 外壳',
-                operator=order.operator,
+                operator=instance.operator,
             )
-            # (2) 线材：1 条
+        # (2) 线材：1 条
+        if item.cable is not None:
             StockAdjustment.objects.create(
-                product=line.cable,
+                product=item.cable,
                 adjustment_type='PRODUCE_CONSUME',
                 quantity=qty,
                 note=f'{note_prefix} 消耗 线材',
-                operator=order.operator,
+                operator=instance.operator,
             )
-            # (3) PCB 方案展开：N 条，每条 = line.quantity × material.quantity_per_unit
-            #     方案的 materials 在 PcbPlanMaterial.Meta.ordering = ['id']，
-            #     不变顺序便于审计。
-            for plan_material in line.pcb_plan.materials.all():
+        # (3) PCB 方案展开：N 条
+        if item.pcb_plan is not None:
+            for plan_material in item.pcb_plan.materials.all():
                 StockAdjustment.objects.create(
                     product=plan_material.material,
                     adjustment_type='PRODUCE_CONSUME',
                     quantity=qty * plan_material.quantity_per_unit,
                     note=(
-                        f'{note_prefix} 消耗 [{line.pcb_plan.name}] '
+                        f'{note_prefix} 消耗 [{item.pcb_plan.name}] '
                         f'{plan_material.material.model_name}'
                     ),
-                    operator=order.operator,
+                    operator=instance.operator,
                 )
 
-        order.executed_at = timezone.now()
-        order.save(update_fields=['executed_at'])
+
+@receiver(post_save, sender=ProductionRecord)
+def auto_promote_to_producing(sender, instance, created, **kwargs):
+    """首条 ProductionRecord 创建时把销售单 status 推到 PRODUCING。BOM-2.1。
+
+    业务语义：销售单从"已下单未生产"切到"生产中"应该由实际生产事件驱动，
+    而不是 manager 手动 PATCH。这条信号让状态机真正活起来——`PRODUCING`
+    状态终于有了自动来源。
+
+    仅在创建（created=True）时触发；推进规则：
+      - 当前 status == ORDERED → 推到 PRODUCING
+      - 当前 status 已经是 PRODUCING / SHIPPED / COMPLETED → 保持不变
+        （SHIPPED 已经是 PRODUCING 的下游状态；倒退由 ShippingLog
+        删除时另外处理——目前业务上不支持删 ShippingLog，先不实现）
+
+    详见 docs/PRD.md §4.2 §9.4 changelog 2026-05-27（BOM-2.1）。
+    """
+    if not created:
+        return
+    order = instance.sales_item.order
+    if order.status == 'ORDERED':
+        order.status = 'PRODUCING'
+        order.save(update_fields=['status'])
 
 
 # 历史信号清单（已删除，请勿恢复，详见 docs/PRD.md §9.4 changelog 2026-05-11）：

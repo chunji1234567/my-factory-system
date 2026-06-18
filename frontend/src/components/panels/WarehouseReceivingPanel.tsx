@@ -1,128 +1,230 @@
-// src/components/panels/warehouse/WarehouseReceivingPanel.tsx
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api/client';
-import FilterBar from '../common/FilterBar';
-import NavbarButton from '../common/NavbarButton';
 import Pagination from '../common/Pagination';
+import {
+  usePurchaseOrders,
+  PurchaseOrderResponse,
+  PurchaseOrdersFilters,
+} from '../../hooks/usePurchaseOrders';
+import { Card, PageHeader, StatusPillFilterRow } from '../primitives';
 import { ReceivingOrderTable } from './warehouse/ReceivingOrderTable';
 import { ReceivingModal } from './warehouse/ReceivingModal';
+import { ReceivingBatchModal } from './warehouse/ReceivingBatchModal';
 
-export default function WarehouseReceivingPanel({ orders, loading, error, onRefresh }: any) {
-  // --- 状态管理 ---
-  const [filters, setFilters] = useState({ supplier: '', status: '' });
+/**
+ * 收货中心（Stage C-5 redesign，2026-06-18）。
+ *
+ * 改造要点（详见 docs/ux-audit.md §2.5）：
+ *   1. 自管 usePurchaseOrders（带 server-side filter + 分页），不再从 App.tsx 拿 props
+ *   2. PageHeader 替换自造 h2 + 英文副标题
+ *   3. 顶部状态筛选用 StatusPillFilterRow（去掉巨大的"待收货/部分到货"双 tab）
+ *   4. 默认 filter = 不限状态——已入库（RECEIVED）订单会沉到底（按 status 排序）
+ *   5. 收货 Modal 简化：删"选择物料"下拉、数量默认剩量、Modal 顶部 banner 改 Section
+ *   6. 新增批量收货：订单卡顶部「全部按可收量收货」→ ReceivingBatchModal 一次性 POST N 条
+ *   7. DueDatePill 显示采购订单 expected_arrival_date 紧迫度
+ *
+ * 与排产/发货卡片共用同一套 design tokens 与 primitives。
+ */
+
+const PAGE_SIZE = 30;
+
+const STATUS_FILTERS = [
+  { value: 'ORDERED', label: '已下单' },
+  { value: 'PARTIAL', label: '部分入库' },
+  { value: 'RECEIVED', label: '全部入库' },
+] as const;
+
+const STATUS_PILL: Record<
+  string,
+  { label: string; tone: 'default' | 'warning' | 'accent' | 'success' }
+> = {
+  ORDERED: { label: '已下单', tone: 'default' },
+  PARTIAL: { label: '部分入库', tone: 'warning' },
+  RECEIVED: { label: '全部入库', tone: 'success' },
+};
+
+const statusOf = (s: string) =>
+  STATUS_PILL[s] ?? { label: s, tone: 'default' as const };
+
+export default function WarehouseReceivingPanel() {
+  // --- 筛选 + 分页 ---
+  const [filterStatus, setFilterStatus] = useState<string>('');
+  const [supplier, setSupplier] = useState('');
   const [page, setPage] = useState(1);
-  const [modalOrderId, setModalOrderId] = useState<number | null>(null);
-  const [draft, setDraft] = useState({ purchaseItemId: null, quantity: '', remark: '' });
-  const [modalError, setModalError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  useEffect(() => setPage(1), [filterStatus, supplier]);
 
-  // --- 逻辑处理 ---
-  const filteredOrders = useMemo(() => {
-    return (orders || []).filter((o: any) => {
-      const matchSupplier = !filters.supplier || o.partner_name?.toLowerCase().includes(filters.supplier.toLowerCase());
-      const matchStatus = !filters.status || o.status === filters.status;
-      return matchSupplier && matchStatus;
-    }).sort((a: any, b: any) => {
-      const aCompleted = a.status === 'RECEIVED';
-      const bCompleted = b.status === 'RECEIVED';
-      if (aCompleted !== bCompleted) return aCompleted ? 1 : -1;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
-  }, [orders, filters]);
+  const apiFilters = useMemo<PurchaseOrdersFilters>(() => {
+    const f: PurchaseOrdersFilters = {};
+    if (filterStatus) f.status = filterStatus;
+    if (supplier.trim()) f.partner_name = supplier.trim();
+    return f;
+  }, [filterStatus, supplier]);
 
-  const pagedOrders = useMemo(() => filteredOrders.slice((page - 1) * 30, page * 30), [filteredOrders, page]);
+  const ordersQuery = usePurchaseOrders({
+    enabled: true,
+    page,
+    pageSize: PAGE_SIZE,
+    filters: apiFilters,
+  });
 
-  // --- 业务动作 ---
-  const handleOpenModal = (orderId: number, itemId: number) => {
-    setModalOrderId(orderId);
-    setDraft({ purchaseItemId: itemId as any, quantity: '', remark: '' });
-    setModalError(null);
+  const pagedOrders = ordersQuery.data;
+  const totalCount = ordersQuery.pagination.totalCount;
+  const onRefresh = ordersQuery.reload;
+
+  // --- 单条收货 Modal ---
+  const [singleModal, setSingleModal] = useState<{
+    open: boolean;
+    orderId: number | null;
+    itemId: number | null;
+  }>({ open: false, orderId: null, itemId: null });
+  const [singleError, setSingleError] = useState<string | null>(null);
+  const [singleSaving, setSingleSaving] = useState(false);
+
+  const handleOpenSingle = (orderId: number, itemId: number) => {
+    setSingleModal({ open: true, orderId, itemId });
+    setSingleError(null);
   };
 
-  const handleConfirm = async () => {
-    if (!draft.purchaseItemId || !draft.quantity) {
-      setModalError("请填写完整收货信息");
-      return;
-    }
+  const handleCloseSingle = () => setSingleModal({ open: false, orderId: null, itemId: null });
+
+  const handleSingleSubmit = async ({ quantity, remark }: { quantity: number; remark: string }) => {
+    if (!singleModal.itemId) return;
     try {
-      setSaving(true);
+      setSingleSaving(true);
+      setSingleError(null);
       await api.createReceivingLog({
-        purchase_item: draft.purchaseItemId,
-        quantity_received: Number(draft.quantity),
-        remark: draft.remark || undefined,
+        purchase_item: singleModal.itemId,
+        quantity_received: quantity,
+        remark: remark || undefined,
       });
-      setModalOrderId(null);
+      handleCloseSingle();
       await onRefresh();
     } catch (err: any) {
-      setModalError(err.message);
+      setSingleError(err?.message ?? '入库失败');
     } finally {
-      setSaving(false);
+      setSingleSaving(false);
     }
   };
 
-  if (error) return <div className="p-10 text-rose-500 font-black bg-rose-50 rounded-[2.5rem]">⚠️ 加载失败: {error}</div>;
+  // --- 批量收货 Modal ---
+  const [batchModal, setBatchModal] = useState<{ open: boolean; orderId: number | null }>({
+    open: false,
+    orderId: null,
+  });
+  const [batchSaving, setBatchSaving] = useState(false);
+
+  const handleOpenBatch = (orderId: number) => {
+    setBatchModal({ open: true, orderId });
+  };
+  const handleCloseBatch = () => setBatchModal({ open: false, orderId: null });
+
+  const handleBatchSubmit = async (
+    payloads: { purchase_item: number; quantity_received: number; remark?: string }[],
+  ) => {
+    setBatchSaving(true);
+    try {
+      const failures: { item: any; msg: string }[] = [];
+      // 串行避免后端 ReceivingLog 校验在并发下漂移
+      for (const p of payloads) {
+        try {
+          await api.createReceivingLog(p);
+        } catch (err: any) {
+          const item =
+            pagedOrders
+              .flatMap((o) => o.items)
+              .find((i) => i.id === p.purchase_item) ?? { id: p.purchase_item };
+          failures.push({ item, msg: err?.message ?? '入库失败' });
+        }
+      }
+      await onRefresh();
+      if (failures.length === 0) handleCloseBatch();
+      return failures;
+    } finally {
+      setBatchSaving(false);
+    }
+  };
+
+  const currentSingleOrder: PurchaseOrderResponse | null = singleModal.orderId
+    ? pagedOrders.find((o) => o.id === singleModal.orderId) ?? null
+    : null;
+  const currentBatchOrder: PurchaseOrderResponse | null = batchModal.orderId
+    ? pagedOrders.find((o) => o.id === batchModal.orderId) ?? null
+    : null;
 
   return (
-    <div className="space-y-8 md:space-y-12 animate-in fade-in pb-24">
-      
-      {/* 1. 复用 FilterBar */}
-      <FilterBar actions={
-        <NavbarButton variant="outline" className="font-black px-6" onClick={() => setFilters({ supplier: '', status: '' })}>
-          重置筛选
-        </NavbarButton>
-      }>
-        <FilterBar.Field label="搜索供应商名称 / 订单编号">
-          <input 
-            className="w-full rounded-full border border-slate-200 px-6 py-4 text-base font-bold outline-none focus:border-slate-900 transition-all shadow-inner"
-            placeholder="输入关键词进行实时检索..."
-            value={filters.supplier}
-            onChange={(e) => { setFilters({ ...filters, supplier: e.target.value }); setPage(1); }}
-          />
-        </FilterBar.Field>
-      </FilterBar>
+    <div className="space-y-section-gap animate-in fade-in duration-500 pb-20">
+      <PageHeader title="收货中心" description="按供应商核对到货并入库" />
 
-      {/* 2. 状态切换选项卡 */}
-      <div className="flex gap-3 overflow-x-auto pb-4 px-1 scrollbar-hide">
-        {[
-          { v: 'ORDERED', l: '待收货订单' },
-          { v: 'PARTIAL', l: '部分到货' }
-        ].map(opt => (
-          <button
-            key={opt.v}
-            onClick={() => { setFilters(prev => ({ ...prev, status: prev.status === opt.v ? '' : opt.v })); setPage(1); }}
-            className={`whitespace-nowrap px-8 py-3 rounded-full text-[15px] font-black transition-all border-2 ${
-              filters.status === opt.v 
-                ? 'bg-slate-900 text-white border-slate-900 shadow-xl scale-105' 
-                : 'bg-white text-slate-400 border-slate-100 hover:border-slate-200'
-            }`}
-          >
-            {opt.l}
-          </button>
-        ))}
-      </div>
-
-      {/* 3. 数据列表区 */}
-      <div className="relative min-h-[400px]">
-        {loading && (
-          <div className="absolute inset-0 bg-white/60 z-20 flex items-center justify-center backdrop-blur-sm rounded-[3rem]">
-            <div className="w-10 h-10 border-4 border-slate-900 border-t-transparent rounded-full animate-spin" />
+      {/* 筛选区 */}
+      <Card flat tone="subtle" padding="tight">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="flex-1 max-w-md">
+            <input
+              className="w-full rounded-input border border-line bg-surface px-4 py-2 text-body outline-none
+                         focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors"
+              placeholder="按供应商名称搜索..."
+              value={supplier}
+              onChange={(e) => setSupplier(e.target.value)}
+            />
           </div>
-        )}
-        <ReceivingOrderTable orders={pagedOrders} onOpenModal={handleOpenModal} />
-      </div>
+          <StatusPillFilterRow
+            options={STATUS_FILTERS}
+            value={filterStatus}
+            onChange={setFilterStatus}
+            onReset={
+              filterStatus || supplier
+                ? () => {
+                    setFilterStatus('');
+                    setSupplier('');
+                  }
+                : undefined
+            }
+          />
+        </div>
+      </Card>
 
-      <Pagination page={page} total={filteredOrders.length} onPageChange={setPage} />
+      {/* 列表 */}
+      {ordersQuery.loading ? (
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-8">加载中...</p>
+        </Card>
+      ) : ordersQuery.error ? (
+        <Card tone="danger" padding="tight">
+          <p className="text-caption text-danger-ink">⚠ {ordersQuery.error}</p>
+        </Card>
+      ) : pagedOrders.length === 0 ? (
+        <Card>
+          <p className="text-center text-caption text-ink-faint py-10">没有匹配的采购订单</p>
+        </Card>
+      ) : (
+        <ReceivingOrderTable
+          orders={pagedOrders}
+          statusOf={statusOf}
+          onReceiveOne={handleOpenSingle}
+          onReceiveAll={handleOpenBatch}
+        />
+      )}
 
-      {/* 4. 业务弹窗 */}
-      <ReceivingModal 
-        open={!!modalOrderId}
-        onClose={() => setModalOrderId(null)}
-        order={orders?.find((o: any) => o.id === modalOrderId)}
-        draft={draft}
-        setDraft={setDraft}
-        onConfirm={handleConfirm}
-        error={modalError}
-        saving={saving}
+      <Pagination page={page} total={totalCount} onPageChange={setPage} />
+
+      {/* 单条收货 Modal */}
+      <ReceivingModal
+        open={singleModal.open}
+        onClose={handleCloseSingle}
+        order={currentSingleOrder}
+        itemId={singleModal.itemId}
+        onSubmit={handleSingleSubmit}
+        error={singleError}
+        saving={singleSaving}
+      />
+
+      {/* 批量收货 Modal */}
+      <ReceivingBatchModal
+        open={batchModal.open}
+        onClose={handleCloseBatch}
+        order={currentBatchOrder}
+        onSubmit={handleBatchSubmit}
+        saving={batchSaving}
       />
     </div>
   );

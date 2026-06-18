@@ -26,6 +26,10 @@ class SalesOrder(models.Model):
     # 计算（合作方层级，不再追到单一订单）。详见 docs/PRD.md §4.4。
     created_at = models.DateTimeField("创建时间", auto_now_add=True)
     operator = models.CharField("录单员", max_length=50)
+    # 答应客户在哪天前送到。可空：急单或老数据可能未填。
+    # 用途：排产/发货卡片右上角 DueDatePill，列表交期列，按交期排序与筛选。
+    # 注意是订单级——客户基本是"一张单一个交期"；分批发货由 ShippingLog 承载。
+    expected_delivery_date = models.DateField("预计交付日期", null=True, blank=True)
 
     class Meta:
         verbose_name = "销售订单"
@@ -94,6 +98,33 @@ class SalesOrderItem(models.Model):
         # 实时计算已发货总数
         return self.shippings.aggregate(total=Sum('quantity_shipped'))['total'] or 0
 
+    @property
+    def produced_quantity(self):
+        """本明细已生产总量——所有 ProductionRecord.quantity 之和。
+
+        BOM-2.1（2026-05-27）起，排产改为 ProductionRecord：每条记录创建即扣料（除非
+        skip_consumption=True），生效后计入本属性。详见 docs/PRD.md §4.5。
+
+        典型用途：
+        - 排产中心：本明细"待排" = quantity - produced_quantity（业务上 ≥ 0）
+        - 发货中心：本明细"可发" = min(quantity, produced_quantity) - shipped_quantity
+        """
+        from django.db.models import Sum as _Sum
+        return self.production_records.aggregate(total=_Sum('quantity'))['total'] or 0
+
+    @property
+    def available_to_ship_quantity(self):
+        """本明细当前可发数量。
+
+        = min(quantity, produced_quantity) - shipped_quantity
+
+        被订单数量截断：即使 produced 因边缘场景（减单 + 历史已排产留存）大于 quantity，
+        本订单也只能发 quantity 套——多余的成品物理存在，但不在本订单账上。
+        业务上的"跨订单挪用"暂不支持自动调拨，靠 admin 手动 skip_consumption 实现，
+        详见 docs/PRD.md §9.3。
+        """
+        return max(0, min(self.quantity, self.produced_quantity) - self.shipped_quantity)
+
 class ShippingLog(models.Model):
     """分批发货记录：核心自动化点"""
     sales_item = models.ForeignKey(SalesOrderItem, related_name='shippings', on_delete=models.CASCADE)
@@ -133,6 +164,10 @@ class PurchaseOrder(models.Model):
     # 计算（合作方层级，不再追到单一订单）。详见 docs/PRD.md §4.4。
     created_at = models.DateTimeField(auto_now_add=True)
     operator = models.CharField("操作员", max_length=50)
+    # 供应商承诺哪天前到我仓。可空：现货采购或老数据可能未填。
+    # 用途：收货中心订单卡右上角 DueDatePill，列表到货列，按到货排序。
+    # 注意命名差异：销售用 delivery（送达客户），采购用 arrival（到达本仓）。
+    expected_arrival_date = models.DateField("预计到货日期", null=True, blank=True)
 
     class Meta:
         verbose_name = "采购订单"
@@ -349,99 +384,56 @@ class PartnerLedgerEntry(models.Model):
         return f"{self.partner.name} {self.entry_type} {self.amount}"
 
 
-# --- 4. 排产（BOM 自动扣料） ---
+# --- 4. 排产记录（BOM-2.1 起：append-only 事件，挂在销售明细下） ---
 
-class ProductionOrder(models.Model):
-    """每日排产单——决定今天要做哪些销售明细（或备货）的成品组装。
+class ProductionRecord(models.Model):
+    """排产记录——一条 = "为某条销售明细记一笔今日产量"。
 
-    状态机：``PLANNED`` → ``EXECUTED`` 或 ``CANCELLED``。
-    - ``PLANNED``：已排产但还没扣料。可以编辑 lines 也可以取消。
-    - ``EXECUTED``：已扣料。**不可逆事件**——线 / 状态 / 数量都锁死。
-       要"撤销"必须新加反向 StockAdjustment(MANUAL_IN) 把料退回（与
-       ``rules/backend-rules.md §1.5`` 的 append-only 总则一致）。
-    - ``CANCELLED``：只能从 PLANNED 转到这里。
+    BOM-2.1（2026-05-27）重设计——以前是独立 ProductionOrder + N 条
+    ProductionOrderLine 的两段式状态机（PLANNED → EXECUTED / CANCELLED），
+    现在退化为单条事件流：**创建即扣料 + append-only**，与 ShippingLog 完全对称。
 
-    扣料逻辑：由 ``business/signals.py`` 中的
-    ``execute_production_consumption`` 在状态切到 EXECUTED 时统一处理——
-    对每条 line 各写 3 条 ``StockAdjustment(PRODUCE_CONSUME)``（外壳 /
-    板材 / 线材）。允许库存变负（半成品由其他车间生产，本系统只记账）。
+    业务约束：
+      1. ``sales_item`` 必填，**不允许备货模式**——所有生产必须挂在销售明细下。
+      2. 创建时扣 (2 + N) 条 StockAdjustment(PRODUCE_CONSUME)：1 条 shell +
+         1 条 cable + N 条 pcb_plan 展开的原材料；shell / pcb_plan / cable
+         全部从 ``sales_item`` 取，避免数据漂移（详见 signals 中的
+         ``auto_consume_on_production_record_create``）。
+      3. ``skip_consumption=True`` 时跳过扣料——仅 admin 后台为"已生产但跨订单
+         挪用"等边缘场景使用（详见 docs/PRD.md §9.3）。
+      4. **过排产禁止**：serializer 校验 ``produced_quantity + this.quantity
+         <= sales_item.quantity``。
+      5. 创建后**不能编辑/删除**——append-only 事件。要"撤销"必须录反向
+         ``StockAdjustment(MANUAL_IN)``（与 backend-rules.md §1.5 一致）。
+      6. 首条 ProductionRecord 创建时由信号自动推 ``SalesOrder.status``
+         ORDERED → PRODUCING（详见 signals.auto_promote_to_producing）。
 
-    详见 docs/PRD.md §3.2 §4 §9.4 changelog 2026-05-11。
+    详见 docs/PRD.md §3.2 / §4.5 / §9.4 changelog 2026-05-27（BOM-2.1）。
     """
-    STATUS_CHOICES = (
-        ('PLANNED', '已排产'),
-        ('EXECUTED', '已扣料'),
-        ('CANCELLED', '已取消'),
-    )
-    order_no = models.CharField("排产单号", max_length=50, unique=True)
-    plan_date = models.DateField("排产日期")
-    status = models.CharField("状态", choices=STATUS_CHOICES, default='PLANNED', max_length=20)
-    note = models.CharField("备注", max_length=200, blank=True)
-    operator = models.CharField("操作员", max_length=50)
-    created_at = models.DateTimeField("创建时间", auto_now_add=True)
-    executed_at = models.DateTimeField("扣料时间", null=True, blank=True)
-
-    class Meta:
-        verbose_name = "排产单"
-        verbose_name_plural = verbose_name
-        ordering = ['-plan_date', '-created_at']
-
-    def __str__(self):
-        return f"{self.order_no} ({self.get_status_display()})"
-
-
-class ProductionOrderLine(models.Model):
-    """排产明细——做多少套 (外壳 + PCB 方案 + 线材)。
-
-    BOM-2.0 改造后（2026-05-21，详见 docs/PRD.md §4.5）：
-    板材从"半成品 FK"换成"PCB 方案 FK"，排产时按方案展开为原材料清单扣减。
-
-    两种来源场景：
-    - 基于销售单：``sales_item`` 指向某个 ``SalesOrderItem``，三件来自该明细
-      的 ``product`` / ``pcb_plan`` / ``cable``。多条 line 可以指向同一销售明细
-      （分多天产）。``shell`` / ``pcb_plan`` / ``cable`` 显式记录"实际扣的方案"，
-      避免 sales_item 后续被编辑时排产历史漂移。
-    - 备货性生产：``sales_item`` 为 null，三件由 manager / warehouse 直接选。
-
-    扣料行为：每条 line 扣 (2 + N) 条 StockAdjustment(PRODUCE_CONSUME)：
-      1 条扣 shell、1 条扣 cable、N 条扣 pcb_plan.materials 展开的原材料。
-    详见 ``business/signals.execute_production_consumption``。
-    """
-    production_order = models.ForeignKey(
-        ProductionOrder, related_name='lines', on_delete=models.CASCADE,
-    )
     sales_item = models.ForeignKey(
         SalesOrderItem,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='production_lines',
+        on_delete=models.CASCADE,
+        related_name='production_records',
         verbose_name="关联销售明细",
+        help_text="必填——所有生产必须挂在销售明细下，不允许备货模式",
     )
-    shell = models.ForeignKey(
-        Product,
-        on_delete=models.PROTECT,
-        related_name='+',
-        limit_choices_to={'category__category_type': 'SELF_MADE'},
-        verbose_name="外壳",
+    quantity = models.DecimalField("本次产量", max_digits=12, decimal_places=2)
+    skip_consumption = models.BooleanField(
+        "跳过扣料",
+        default=False,
+        help_text=(
+            "仅 admin 内部使用。True 时本条记录不触发扣料信号——用于"
+            '"跨订单挪用已生产成品"等边缘场景（详见 docs/PRD.md §9.3）。'
+        ),
     )
-    pcb_plan = models.ForeignKey(
-        'core.PcbPlan',
-        on_delete=models.PROTECT,
-        related_name='+',
-        verbose_name="PCB 方案",
-        help_text="排产时按此方案展开为原材料清单扣减库存",
-    )
-    cable = models.ForeignKey(
-        Product,
-        on_delete=models.PROTECT,
-        related_name='+',
-        limit_choices_to={'category__category_type': 'CABLE'},
-        verbose_name="线材",
-    )
-    quantity = models.DecimalField("数量", max_digits=12, decimal_places=2)
+    operator = models.CharField("操作员", max_length=50)
     note = models.CharField("备注", max_length=200, blank=True)
+    executed_at = models.DateTimeField("生产时间", auto_now_add=True)
 
     class Meta:
-        verbose_name = "排产明细"
+        verbose_name = "排产记录"
         verbose_name_plural = verbose_name
+        ordering = ['-executed_at']
+
+    def __str__(self):
+        return f"排产 #{self.id} sales_item={self.sales_item_id} 数量={self.quantity}"

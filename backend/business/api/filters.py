@@ -7,7 +7,7 @@ from business.models import (
     ShippingLog,
     StockAdjustment,
     FinancialTransaction,
-    ProductionOrder,
+    ProductionRecord,
 )
 
 
@@ -76,11 +76,20 @@ class FinancialTransactionFilter(django_filters.FilterSet):
         fields = ['partner', 'transaction_type']
 
 
-class ProductionOrderFilter(django_filters.FilterSet):
-    plan_date_from = django_filters.DateFilter(field_name='plan_date', lookup_expr='gte')
-    plan_date_to = django_filters.DateFilter(field_name='plan_date', lookup_expr='lte')
-    order_no = django_filters.CharFilter(field_name='order_no', lookup_expr='icontains')
+class ProductionRecordFilter(django_filters.FilterSet):
+    """排产记录过滤（BOM-2.1）。
+
+    - sales_item / sales_order / partner: 按引用关系筛
+    - executed_from / executed_to: 按生产时间范围
+    - operator: 按操作员
+    """
+
+    sales_order = django_filters.NumberFilter(field_name='sales_item__order_id')
+    partner = django_filters.NumberFilter(field_name='sales_item__order__partner_id')
+    executed_from = django_filters.DateFilter(field_name='executed_at', lookup_expr='date__gte')
+    executed_to = django_filters.DateFilter(field_name='executed_at', lookup_expr='date__lte')
+    operator = django_filters.CharFilter(field_name='operator', lookup_expr='icontains')
 
     class Meta:
-        model = ProductionOrder
-        fields = ['status', 'plan_date', 'order_no']
+        model = ProductionRecord
+        fields = ['sales_item', 'sales_order', 'partner', 'executed_from', 'executed_to', 'operator']

@@ -5,3 +5,10 @@
 body {
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
+
+/*
+ * 2026-06-18：旧的 `@media print` 块已删除——发货单从浏览器 HTML print
+ * 切换到后端 PDF 生成（详见 backend/business/api/shipping_note_pdf.py）。
+ * 这套 visibility 切换的 trick 主要是给 ShippingPanel 的发货单 Modal 用的；
+ * Modal 删了，规则也跟着退役。
+ */

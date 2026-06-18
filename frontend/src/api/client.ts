@@ -120,13 +120,14 @@ export interface PcbPlansQueryParams extends ListQueryParams {
   code?: string;
 }
 
-/** 排产单列表查询参数，与后端 ProductionOrderFilter 对齐（详见 docs/PRD.md §4）。 */
-export interface ProductionOrdersQueryParams extends ListQueryParams {
-  status?: 'PLANNED' | 'EXECUTED' | 'CANCELLED';
-  plan_date?: string;            // YYYY-MM-DD
-  plan_date_from?: string;
-  plan_date_to?: string;
-  order_no?: string;
+/** 排产记录列表查询参数（BOM-2.1，与后端 ProductionRecordFilter 对齐）。 */
+export interface ProductionRecordsQueryParams extends ListQueryParams {
+  sales_item?: number;
+  sales_order?: number;
+  partner?: number;
+  executed_from?: string;       // YYYY-MM-DD
+  executed_to?: string;
+  operator?: string;
 }
 
 /** 把 query params 对象序列化成带 `?` 前缀的 query string；空对象返回空串。
@@ -386,6 +387,8 @@ export const api = {
     partner: number;
     operator?: string;
     items_payload: SalesOrderItemPayload[];
+    /** ISO 日期串 "YYYY-MM-DD"，可空。详见 backend migration 0019。 */
+    expected_delivery_date?: string | null;
   }) {
     return apiFetch(`/api/business/sales-orders/`, {
       method: 'POST',
@@ -403,6 +406,7 @@ export const api = {
       status: string;
       operator?: string;
       items_payload: SalesOrderItemPayload[];
+      expected_delivery_date: string | null;
     }>,
   ) {
     return apiFetch(`/api/business/sales-orders/${id}/`, {
@@ -450,6 +454,8 @@ export const api = {
     partner: number;
     operator?: string;
     items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>;
+    /** ISO 日期串 "YYYY-MM-DD"，可空。详见 backend migration 0019。 */
+    expected_arrival_date?: string | null;
   }) {
     return apiFetch(`/api/business/purchase-orders/`, {
       method: 'POST',
@@ -458,7 +464,13 @@ export const api = {
   },
   updatePurchaseOrder(
     id: number,
-    payload: Partial<{ partner: number; status: string; operator?: string; items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>; }>,
+    payload: Partial<{
+      partner: number;
+      status: string;
+      operator?: string;
+      items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>;
+      expected_arrival_date: string | null;
+    }>,
   ) {
     return apiFetch(`/api/business/purchase-orders/${id}/`, {
       method: 'PATCH',
@@ -485,70 +497,25 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  // --- 排产（BOM 自动扣料） ---
-  // 详见 docs/PRD.md §4 排产流程。三角色（manager/warehouse/shipper）均可使用。
-  getProductionOrders(params: ProductionOrdersQueryParams | string = '') {
+  // --- 排产记录（BOM-2.1：append-only 事件，挂在销售明细下） ---
+  // 三角色（manager/warehouse/shipper）均可。详见 docs/PRD.md §4.5。
+  getProductionRecords(params: ProductionRecordsQueryParams | string = '') {
     const qs = typeof params === 'string' ? params : toQueryString(params);
-    return apiFetch(`/api/business/production-orders/${qs}`);
+    return apiFetch(`/api/business/production-records/${qs}`);
   },
-  createProductionOrder(payload: {
-    // order_no 可选，后端自动生成 PRD{year}-{NNNN}
-    order_no?: string;
-    plan_date: string;          // YYYY-MM-DD
-    operator?: string;
+  /**
+   * 创建一条排产记录：**创建即扣料**（不可逆）。
+   * 前端在提交前需要显眼提示用户"会扣 (2+N) 条 PRODUCE_CONSUME"。
+   * 服务端校验：过排产（produced + new > sales_item.quantity）会 400。
+   */
+  createProductionRecord(payload: {
+    sales_item: number;
+    quantity: number;
     note?: string;
-    lines_payload: Array<{
-      id?: number;
-      sales_item?: number | null;
-      // 备货场景必须传三件（外壳 + PCB 方案 + 线材，BOM-2.0）；
-      // 关联销售明细时可让后端从 sales_item 自动回填
-      shell?: number;
-      pcb_plan?: number;
-      cable?: number;
-      quantity: number;
-      note?: string;
-    }>;
   }) {
-    return apiFetch(`/api/business/production-orders/`, {
+    return apiFetch(`/api/business/production-records/`, {
       method: 'POST',
       body: JSON.stringify(payload),
-    });
-  },
-  updateProductionOrder(
-    id: number,
-    payload: Partial<{
-      plan_date: string;
-      operator: string;
-      note: string;
-      lines_payload: Array<{
-        id?: number;
-        sales_item?: number | null;
-        shell?: number;
-        pcb_plan?: number;
-        cable?: number;
-        quantity: number;
-        note?: string;
-      }>;
-    }>,
-  ) {
-    // 仅在 PLANNED 状态下后端允许编辑；EXECUTED/CANCELLED 会返回 400。
-    return apiFetch(`/api/business/production-orders/${id}/`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-  },
-  executeProductionOrder(id: number) {
-    // POST 触发扣料：状态 PLANNED → EXECUTED，自动写 3N 条 PRODUCE_CONSUME 调整。
-    // 不可逆，前端需要在提交前给用户显眼提示。
-    return apiFetch(`/api/business/production-orders/${id}/execute/`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
-  },
-  cancelProductionOrder(id: number) {
-    return apiFetch(`/api/business/production-orders/${id}/cancel/`, {
-      method: 'POST',
-      body: JSON.stringify({}),
     });
   },
   getFinanceSummary(type: 'receivable' | 'payable' = 'receivable') {
@@ -563,6 +530,47 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+  /**
+   * 导出选中的 ShippingLog 为 PDF 发货单（详见
+   * backend/business/api/shipping_note_pdf.py）。
+   * 同客户的多笔合并成同一页；不同客户分页。
+   */
+  async exportShippingNotePdf(logIds: number[]) {
+    if (!authToken) {
+      throw new Error('Missing auth token');
+    }
+    if (logIds.length === 0) {
+      throw new Error('请至少选中一条发货流水');
+    }
+    const params = new URLSearchParams({ log_ids: logIds.join(',') });
+    const response = await fetch(
+      `${API_BASE_URL}/api/business/shipping-logs/export-pdf/?${params.toString()}`,
+      {
+        headers: {
+          Accept: 'application/pdf',
+          Authorization: `Bearer ${authToken}`,
+        },
+      },
+    );
+    if (!response.ok) {
+      let message = '导出发货单失败';
+      try {
+        const text = await response.text();
+        if (text) {
+          try {
+            const data = JSON.parse(text);
+            message = data.detail || text;
+          } catch {
+            message = text;
+          }
+        }
+      } catch {
+        // noop
+      }
+      throw new Error(message);
+    }
+    return response.blob();
   },
   createReceivingLog(payload: { purchase_item: number; quantity_received: number; remark?: string }) {
     return apiFetch(`/api/business/receiving-logs/`, {
