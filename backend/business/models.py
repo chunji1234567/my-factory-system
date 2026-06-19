@@ -31,6 +31,15 @@ class SalesOrder(models.Model):
     # 用途：排产/发货卡片右上角 DueDatePill，列表交期列，按交期排序与筛选。
     # 注意是订单级——客户基本是"一张单一个交期"；分批发货由 ShippingLog 承载。
     expected_delivery_date = models.DateField("预计交付日期", null=True, blank=True)
+    # 归档机制（2026-06-19 新增，详见 docs/PRD.md §9.4 changelog）：
+    # - 默认 False，新订单全部可见
+    # - "年末归档"会把 status=COMPLETED 且 is_archived=False 的批量切到 True
+    # - ViewSet.get_queryset 默认 .filter(is_archived=False)——日常列表不显示
+    # - 财务台账 / 合作方余额**照常**包含归档数据——欠款不会因归档清零
+    # - db_index 让 boolean filter 走 B-tree 索引，10 万级订单 < 1ms
+    is_archived = models.BooleanField("已归档", default=False, db_index=True)
+    archived_at = models.DateTimeField("归档时间", null=True, blank=True)
+    archived_by = models.CharField("归档操作员", max_length=50, blank=True, default='')
 
     class Meta:
         verbose_name = "销售订单"
@@ -198,6 +207,11 @@ class PurchaseOrder(models.Model):
     # 用途：收货中心订单卡右上角 DueDatePill，列表到货列，按到货排序。
     # 注意命名差异：销售用 delivery（送达客户），采购用 arrival（到达本仓）。
     expected_arrival_date = models.DateField("预计到货日期", null=True, blank=True)
+    # 归档机制（2026-06-19 新增，详见 docs/PRD.md §9.4 changelog 和 SalesOrder 同字段段落）：
+    # "年末归档"只动 status=RECEIVED 且 is_archived=False 的——已下单或部分入库的不动。
+    is_archived = models.BooleanField("已归档", default=False, db_index=True)
+    archived_at = models.DateTimeField("归档时间", null=True, blank=True)
+    archived_by = models.CharField("归档操作员", max_length=50, blank=True, default='')
 
     class Meta:
         verbose_name = "采购订单"

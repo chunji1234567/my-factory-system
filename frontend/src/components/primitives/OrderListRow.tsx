@@ -43,6 +43,9 @@ interface Props {
   onToggleExpand: () => void;
   /** 展开时渲染在卡片底部的内容（通常是 OrderDetailsView）。 */
   expandedContent: ReactNode;
+  /** 2026-06-19 归档机制（详见 docs/PRD.md §9.4）。
+   *  true 时右侧加一个 "已归档" 灰色 pill；卡片底色变 subtle 提示冻结态。 */
+  archived?: boolean;
 }
 
 export function OrderListRow({
@@ -57,12 +60,13 @@ export function OrderListRow({
   expanded,
   onToggleExpand,
   expandedContent,
+  archived = false,
 }: Props) {
   return (
-    <Card padding="none">
+    <Card padding="none" tone={archived ? 'subtle' : undefined}>
       <div
         onClick={onToggleExpand}
-        className="cursor-pointer p-5 hover:bg-surface-subtle/40 transition-colors"
+        className={`cursor-pointer p-5 transition-colors ${archived ? 'opacity-70 hover:opacity-90' : 'hover:bg-surface-subtle/40'}`}
       >
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div className="min-w-0 flex-1">
@@ -72,6 +76,7 @@ export function OrderListRow({
           <div className="flex items-center gap-2 shrink-0">
             <DueDatePill date={dueDate} outline />
             <Pill tone={statusTone}>{statusLabel}</Pill>
+            {archived && <Pill tone="muted">已归档</Pill>}
           </div>
           <div className="flex items-center gap-3 shrink-0">
             <p className="text-subheading font-mono text-ink font-bold">

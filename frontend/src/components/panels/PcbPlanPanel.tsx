@@ -13,6 +13,7 @@ import {
   ActionBar,
   SearchableSelect,
   ModalFooterButtons,
+  ConfirmDialog,
 } from '../primitives';
 
 /**
@@ -198,14 +199,28 @@ export default function PcbPlanPanel() {
     }
   };
 
-  const toggleActive = async (plan: PcbPlanResponse) => {
+  // 启用/下架方案确认（2026-06-19 替代 window.confirm，详见 §9.4 changelog）。
+  const [toggleConfirm, setToggleConfirm] = useState<{ plan: PcbPlanResponse | null }>({
+    plan: null,
+  });
+  const [toggleWorking, setToggleWorking] = useState(false);
+
+  const openToggleConfirm = (plan: PcbPlanResponse) => setToggleConfirm({ plan });
+
+  const handleToggleConfirm = async () => {
+    const plan = toggleConfirm.plan;
+    if (!plan) return;
     const verb = plan.is_active ? '下架' : '启用';
-    if (!window.confirm(`确定要${verb}方案「${plan.name}」吗？`)) return;
     try {
+      setToggleWorking(true);
       await api.updatePcbPlan(plan.id, { is_active: !plan.is_active });
+      setToggleConfirm({ plan: null });
+      toast.success(`已${verb}方案「${plan.name}」`);
       plansQuery.reload();
     } catch (err: any) {
       toast.error(`${verb}失败：${err.message}`);
+    } finally {
+      setToggleWorking(false);
     }
   };
 
@@ -312,7 +327,7 @@ export default function PcbPlanPanel() {
               expanded={expandedPlans.has(plan.id)}
               onToggleExpand={() => toggleExpand(plan.id)}
               onEdit={() => openEdit(plan)}
-              onToggleActive={() => toggleActive(plan)}
+              onToggleActive={() => openToggleConfirm(plan)}
               fmtMaterial={fmtMaterial}
             />
           ))}
@@ -426,6 +441,31 @@ export default function PcbPlanPanel() {
           </Section>
         </div>
       </Modal>
+
+      {/* 启用/下架确认（2026-06-19 替代 window.confirm，详见 §9.4 changelog） */}
+      <ConfirmDialog
+        open={Boolean(toggleConfirm.plan)}
+        onClose={() => !toggleWorking && setToggleConfirm({ plan: null })}
+        onConfirm={handleToggleConfirm}
+        isWorking={toggleWorking}
+        title={toggleConfirm.plan?.is_active ? '下架 PCB 方案' : '启用 PCB 方案'}
+        confirmLabel={toggleConfirm.plan?.is_active ? '确认下架' : '确认启用'}
+        message={
+          toggleConfirm.plan ? (
+            <p>
+              确认{toggleConfirm.plan.is_active ? '下架' : '启用'}方案
+              <strong className="text-ink">「{toggleConfirm.plan.name}」</strong>？
+              {toggleConfirm.plan.is_active && (
+                <>
+                  <br /><span className="text-ink-faint">
+                    下架后不可被新销售明细选中，历史订单仍保留引用。
+                  </span>
+                </>
+              )}
+            </p>
+          ) : null
+        }
+      />
     </div>
   );
 }

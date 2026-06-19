@@ -135,11 +135,15 @@ class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             'created_at', 'operator', 'items', 'items_payload', 'received_quantity', 'events',
             # 2026-06-18：供应商承诺到货日期。可空，用于收货中心紧迫度提示。
             'expected_arrival_date',
+            # 2026-06-19 归档机制：三件套都只读，通过 .../archive/ .../unarchive/
+            # action 改变，不走通用 PATCH（详见 docs/PRD.md §9.4）。
+            'is_archived', 'archived_at', 'archived_by',
         ]
         # total_amount 是 signal 维护的派生字段——绝对不接受客户端覆盖
         # （详见 docs/PRD.md §4.4 与 signals.sync_purchase_order_ledger 注释）。
         # 客户端如果发了 total_amount，DRF 会静默丢弃。
-        read_only_fields = ['total_amount']
+        # is_archived 等 3 个归档字段同样 read-only——只能走 archive action 改。
+        read_only_fields = ['total_amount', 'is_archived', 'archived_at', 'archived_by']
         extra_kwargs = {
             'order_no': {'required': False, 'allow_blank': True},
             'operator': {'required': False, 'allow_blank': True},
@@ -163,6 +167,12 @@ class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
         return order
 
     def update(self, instance, validated_data):
+        # 归档单冻结（2026-06-19 归档机制，详见 docs/PRD.md §9.4）。
+        # 单条 archive/unarchive 走专门的 ViewSet action，不走通用 update 路径。
+        if instance.is_archived:
+            raise serializers.ValidationError({
+                'detail': '该采购单已归档，请先取消归档再编辑',
+            })
         request = self.context.get('request')
         items_data = validated_data.pop('items_payload', None)
         _resolve_operator(validated_data, request)
@@ -362,11 +372,15 @@ class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             'created_at', 'operator', 'items', 'events', 'items_payload',
             # 2026-06-18：答应客户的交付日期。可空，用于排产/发货卡片紧迫度提示。
             'expected_delivery_date',
+            # 2026-06-19 归档机制：三件套都只读，通过 .../archive/ .../unarchive/
+            # action 改变，不走通用 PATCH（详见 docs/PRD.md §9.4）。
+            'is_archived', 'archived_at', 'archived_by',
         ]
         # total_amount 是 signal 维护的派生字段——绝对不接受客户端覆盖
         # （详见 docs/PRD.md §4.4 与 signals.sync_sales_order_ledger 注释）。
         # 客户端如果发了 total_amount，DRF 会静默丢弃。
-        read_only_fields = ['total_amount']
+        # is_archived 等 3 个归档字段同样 read-only——只能走 archive action 改。
+        read_only_fields = ['total_amount', 'is_archived', 'archived_at', 'archived_by']
         extra_kwargs = {
             'order_no': {'required': False, 'allow_blank': True},
             'operator': {'required': False, 'allow_blank': True},
@@ -388,6 +402,11 @@ class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
         return order
 
     def update(self, instance, validated_data):
+        # 归档单冻结（2026-06-19 归档机制，详见 docs/PRD.md §9.4）。
+        if instance.is_archived:
+            raise serializers.ValidationError({
+                'detail': '该销售单已归档，请先取消归档再编辑',
+            })
         items_data = validated_data.pop('items_payload', None)
         request = self.context.get('request')
         _resolve_operator(validated_data, request)

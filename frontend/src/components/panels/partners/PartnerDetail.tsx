@@ -3,7 +3,7 @@ import { api } from '../../../api/client';
 import type { PartnerResponse } from '../../../hooks/usePartners';
 import { useFinanceTransactions } from '../../../hooks/useFinanceTransactions';
 import Pagination from '../../common/Pagination';
-import { Card, Section, Pill, StatTriple, ActionBar } from '../../primitives';
+import { Card, Section, Pill, StatTriple, ActionBar, ConfirmDialog } from '../../primitives';
 import { formatMoney } from '../../../utils/money';
 import { toast } from '../../../utils/toast';
 import { LedgerTable } from './LedgerTable';
@@ -24,7 +24,7 @@ import type { FinanceTransactionResponse } from '../../../hooks/useFinanceTransa
  *   - PageHeader 风格头部：合作方名 + ID + 余额（formatMoney）+ 返回按钮 + 导出
  *   - Tab 用 StatusPillFilterRow 顶起，与销售/采购/收货风格一致
  *   - 旧深色 banner / amber 编辑卡 / rose 错误条全部退场
- *   - 流水 CRUD 走 TransactionFormModal，删除走 window.confirm
+ *   - 流水 CRUD 走 TransactionFormModal，删除走 ConfirmDialog（2026-06-19 替换 window.confirm）
  */
 
 type TabKey = 'orders' | 'transactions' | 'ledger';
@@ -143,15 +143,28 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
     setTxnModal({ open: true, editing: t });
   const closeTxn = () => setTxnModal({ open: false, editing: null });
 
-  const handleDeleteTxn = async (t: FinanceTransactionResponse) => {
-    if (!window.confirm(`确认删除这笔 ${TXN_LABEL[t.transaction_type] ?? t.transaction_type} 流水？\n操作不可撤销。`))
-      return;
+  // 删除流水确认（2026-06-19 替代 window.confirm，详见 §9.4 changelog）。
+  const [deleteTxnConfirm, setDeleteTxnConfirm] = useState<{
+    txn: FinanceTransactionResponse | null;
+  }>({ txn: null });
+  const [deleteTxnWorking, setDeleteTxnWorking] = useState(false);
+
+  const openDeleteTxnConfirm = (t: FinanceTransactionResponse) => setDeleteTxnConfirm({ txn: t });
+
+  const handleDeleteTxnConfirm = async () => {
+    const t = deleteTxnConfirm.txn;
+    if (!t) return;
     try {
+      setDeleteTxnWorking(true);
       await api.deleteFinanceTransaction(t.id);
+      setDeleteTxnConfirm({ txn: null });
       await txnsQuery.reload();
       onPartnerRefresh();
+      toast.success('流水已删除');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeleteTxnWorking(false);
     }
   };
 
@@ -397,7 +410,7 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
                           编辑
                         </button>
                         <button
-                          onClick={() => handleDeleteTxn(t)}
+                          onClick={() => openDeleteTxnConfirm(t)}
                           className="text-micro text-ink-faint hover:text-danger underline"
                         >
                           删除
@@ -514,6 +527,30 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
           await txnsQuery.reload();
           onPartnerRefresh();
         }}
+      />
+
+      {/* 删除流水确认（2026-06-19 替代 window.confirm，详见 §9.4 changelog） */}
+      <ConfirmDialog
+        open={Boolean(deleteTxnConfirm.txn)}
+        onClose={() => !deleteTxnWorking && setDeleteTxnConfirm({ txn: null })}
+        onConfirm={handleDeleteTxnConfirm}
+        isWorking={deleteTxnWorking}
+        tone="danger"
+        title="删除流水"
+        confirmLabel="确认删除"
+        message={
+          deleteTxnConfirm.txn ? (
+            <p>
+              确认删除这笔
+              <strong className="text-ink">
+                {' '}
+                {TXN_LABEL[deleteTxnConfirm.txn.transaction_type] ?? deleteTxnConfirm.txn.transaction_type}
+              </strong>
+              {' '}流水？
+              <br /><span className="text-danger-ink">此操作不可撤销。</span>
+            </p>
+          ) : null
+        }
       />
     </div>
   );

@@ -24,3 +24,4 @@ export { SearchableSelect } from './SearchableSelect';
 export { StatusPillFilterRow } from './StatusPillFilterRow';
 export { OrderListRow } from './OrderListRow';
 export { ModalFooterButtons, DestructiveButton } from './ModalFooterButtons';
+export { ConfirmDialog } from './ConfirmDialog';

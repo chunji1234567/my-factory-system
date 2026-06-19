@@ -15,10 +15,13 @@ class PurchaseOrderFilter(django_filters.FilterSet):
     created_from = django_filters.DateFilter(field_name='created_at', lookup_expr='gte')
     created_to = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
     order_no = django_filters.CharFilter(field_name='order_no', lookup_expr='icontains')
+    # 归档过滤（2026-06-19）：默认 ViewSet.get_queryset 已过滤 is_archived=False；
+    # 客户端传 ?is_archived=true 看历史归档，传 ?is_archived=false 等价于默认。
+    is_archived = django_filters.BooleanFilter(field_name='is_archived')
 
     class Meta:
         model = PurchaseOrder
-        fields = ['status', 'partner', 'order_no']
+        fields = ['status', 'partner', 'order_no', 'is_archived']
 
 
 class SalesOrderFilter(django_filters.FilterSet):
@@ -26,10 +29,12 @@ class SalesOrderFilter(django_filters.FilterSet):
     created_to = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
     order_no = django_filters.CharFilter(field_name='order_no', lookup_expr='icontains')
     partner_name = django_filters.CharFilter(field_name='partner__name', lookup_expr='icontains')
+    # 归档过滤（2026-06-19）：同 PurchaseOrderFilter。
+    is_archived = django_filters.BooleanFilter(field_name='is_archived')
 
     class Meta:
         model = SalesOrder
-        fields = ['status', 'partner', 'order_no', 'partner_name']
+        fields = ['status', 'partner', 'order_no', 'partner_name', 'is_archived']
 
 
 class ReceivingLogFilter(django_filters.FilterSet):

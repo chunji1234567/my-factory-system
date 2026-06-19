@@ -57,14 +57,31 @@ class FactoryBusinessFlowTest(TestCase):
         self.assertEqual(po.status, 'RECEIVED') # 验证状态变为全部入库
 
         # --- 第二阶段：销售发货 (卖出 5000 个) ---
+        # BOM-2.1（2026-05-27）后销售明细必须挂三件套（外壳 + PCB 方案 + 线材）
+        # 才能排产 / 发货。本测试早于 BOM-2.1，这里补齐占位三件套。
+        from core.models import PcbPlan
+        cable_cat = Category.objects.create(name='线材', category_type='CABLE')
+        cable = Product.objects.create(category=cable_cat, internal_code='CBL-FB', model_name='占位线材')
+        plan = PcbPlan.objects.create(name='占位方案', code='FB')
+
         so = SalesOrder.objects.create(order_no="SO-2026-001", partner=self.customer, operator="Weaver")
-        so_item = SalesOrderItem.objects.create(order=so, product=self.product, custom_product_name="外贸定制外壳", price=25.0, quantity=5000)
+        so_item = SalesOrderItem.objects.create(
+            order=so, product=self.product, pcb_plan=plan, cable=cable,
+            custom_product_name="外贸定制外壳", price=25.0, quantity=5000,
+        )
 
         # 验证订单总额 Signal：125,000
         so.refresh_from_db()
         self.assertEqual(so.total_amount, Decimal('125000.00'))
         self.customer.refresh_from_db()
         self.assertEqual(self.customer.balance, Decimal('125000.00'))
+
+        # BOM-2.1：发货必须先排产（可发量 = min(quantity, produced) - shipped）。
+        # 这里用 skip_consumption=True 避免触发扣料信号——本测试专注发货流程，
+        # 不关心 BOM 展开后的原材料扣减（那是 ProductionRecordTest 的事）。
+        ProductionRecord.objects.create(
+            sales_item=so_item, quantity=5000, operator='生产员', skip_consumption=True,
+        )
 
         # 分两批发货：第一批 2000（库存应保持 10000，不再扣减）
         ShippingLog.objects.create(sales_item=so_item, quantity_shipped=2000, operator="发货员A")

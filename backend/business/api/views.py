@@ -131,11 +131,25 @@ class PurchaseOrderViewSet(mixins.ListModelMixin,
     ordering_fields = ['created_at', 'total_amount']
 
     def get_queryset(self):
-        return (
+        qs = (
             PurchaseOrder.objects.all()
             .prefetch_related('items__product', 'items__receipts', 'events')
             .select_related('partner')
         )
+        # 默认隐藏已归档单（2026-06-19）。**仅 list 路径**强制过滤——retrieve /
+        # destroy / archive / unarchive 都需要能命中归档单。客户端在 list 上
+        # 显式传 ?is_archived=<...> 时 FilterSet 接管，这里不叠加默认。
+        # 详见 docs/PRD.md §9.4 归档机制。
+        if self.action == 'list' and 'is_archived' not in self.request.query_params:
+            qs = qs.filter(is_archived=False)
+        return qs
+
+    def perform_destroy(self, instance):
+        # 归档单冻结——不能删（2026-06-19 归档机制）
+        if instance.is_archived:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({'detail': '该采购单已归档，请先取消归档再删除'})
+        super().perform_destroy(instance)
 
     @action(detail=True, methods=['get', 'post'], permission_classes=[IsAuthenticated, IsManagerOrWarehouse], url_path='events')
     def events(self, request, pk=None):
@@ -143,10 +157,60 @@ class PurchaseOrderViewSet(mixins.ListModelMixin,
         if request.method.lower() == 'get':
             serializer = PurchaseOrderEventSerializer(order.events.order_by('-created_at'), many=True)
             return Response(serializer.data)
+        # 归档单冻结：不允许追加事件
+        if order.is_archived:
+            return Response({'detail': '该采购单已归档，不能追加事件'}, status=400)
         serializer = PurchaseOrderEventSerializer(data=request.data, context={'order': order, 'request': request})
         serializer.is_valid(raise_exception=True)
         event = serializer.save()
         return Response(PurchaseOrderEventSerializer(event).data, status=201)
+
+    # ----- 归档机制（2026-06-19 新增，详见 docs/PRD.md §9.4） ----------------
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated, IsManager], url_path='archive-batch')
+    def archive_batch(self, request):
+        """一键归档所有 status=RECEIVED 且 is_archived=False 的采购单（manager only）。
+
+        返回 ``{archived_count: N}``。无 payload。
+        前端"年末归档"按钮点确认后调这个 endpoint。
+        """
+        from django.utils import timezone
+        operator = request.user.get_full_name() or request.user.get_username()
+        eligible = PurchaseOrder.objects.filter(status='RECEIVED', is_archived=False)
+        archived_count = eligible.count()
+        eligible.update(
+            is_archived=True,
+            archived_at=timezone.now(),
+            archived_by=operator,
+        )
+        return Response({'archived_count': archived_count})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsManager])
+    def archive(self, request, pk=None):
+        """单条归档（manager only）。要求 status=RECEIVED。"""
+        from django.utils import timezone
+        order = self.get_object()
+        if order.is_archived:
+            return Response({'detail': '该采购单已归档'}, status=400)
+        if order.status != 'RECEIVED':
+            return Response({'detail': '仅 RECEIVED 状态的采购单可归档'}, status=400)
+        operator = request.user.get_full_name() or request.user.get_username()
+        order.is_archived = True
+        order.archived_at = timezone.now()
+        order.archived_by = operator
+        order.save(update_fields=['is_archived', 'archived_at', 'archived_by'])
+        return Response(PurchaseOrderSerializer(order, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsManager])
+    def unarchive(self, request, pk=None):
+        """单条取消归档（manager only）。取消后订单可再次编辑。"""
+        order = self.get_object()
+        if not order.is_archived:
+            return Response({'detail': '该采购单未归档'}, status=400)
+        order.is_archived = False
+        order.archived_at = None
+        order.archived_by = ''
+        order.save(update_fields=['is_archived', 'archived_at', 'archived_by'])
+        return Response(PurchaseOrderSerializer(order, context={'request': request}).data)
 
 
 class SalesOrderViewSet(mixins.ListModelMixin,
@@ -166,7 +230,7 @@ class SalesOrderViewSet(mixins.ListModelMixin,
     ordering_fields = ['created_at', 'total_amount']
 
     def get_queryset(self):
-        return (
+        qs = (
             SalesOrder.objects
             .all()
             .prefetch_related(
@@ -176,6 +240,20 @@ class SalesOrderViewSet(mixins.ListModelMixin,
             )
             .select_related('partner')
         )
+        # 默认隐藏已归档单（2026-06-19）。**仅 list 路径**强制过滤——retrieve /
+        # destroy / archive / unarchive 都需要能命中归档单。客户端在 list 上
+        # 显式传 ?is_archived=<...> 时 FilterSet 接管，这里不叠加默认。
+        # 详见 docs/PRD.md §9.4 归档机制。
+        if self.action == 'list' and 'is_archived' not in self.request.query_params:
+            qs = qs.filter(is_archived=False)
+        return qs
+
+    def perform_destroy(self, instance):
+        # 归档单冻结——不能删（2026-06-19 归档机制）
+        if instance.is_archived:
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError({'detail': '该销售单已归档，请先取消归档再删除'})
+        super().perform_destroy(instance)
 
     @action(detail=True, methods=['get', 'post'], permission_classes=[IsAuthenticated, IsManagerOrShipper], url_path='events')
     def events(self, request, pk=None):
@@ -183,6 +261,9 @@ class SalesOrderViewSet(mixins.ListModelMixin,
         if request.method.lower() == 'get':
             serializer = OrderEventSerializer(order.events.order_by('-created_at'), many=True)
             return Response(serializer.data)
+        # 归档单冻结：不允许追加事件
+        if order.is_archived:
+            return Response({'detail': '该销售单已归档，不能追加事件'}, status=400)
         serializer = OrderEventSerializer(data=request.data, context={'order': order, 'request': request})
         serializer.is_valid(raise_exception=True)
         event = serializer.save()
@@ -191,6 +272,9 @@ class SalesOrderViewSet(mixins.ListModelMixin,
     @action(detail=True, methods=['patch'], permission_classes=[IsAuthenticated, IsManagerOrShipper])
     def status(self, request, pk=None):
         order = self.get_object()
+        # 归档单冻结——不能改 status（2026-06-19 归档机制）
+        if order.is_archived:
+            return Response({'detail': '该销售单已归档，不能改状态'}, status=400)
         target_status = request.data.get('status')
         valid_statuses = {choice[0] for choice in SalesOrder.STATUS_CHOICES}
 
@@ -217,6 +301,53 @@ class SalesOrderViewSet(mixins.ListModelMixin,
             return False
         # 只允许保持原状态或前进到下一阶段
         return target_index == current_index + 1
+
+    # ----- 归档机制（2026-06-19 新增，详见 docs/PRD.md §9.4） ----------------
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated, IsManager], url_path='archive-batch')
+    def archive_batch(self, request):
+        """一键归档所有 status=COMPLETED 且 is_archived=False 的销售单（manager only）。
+
+        返回 ``{archived_count: N}``。无 payload。
+        前端"年末归档"按钮点确认后调这个 endpoint。
+        """
+        from django.utils import timezone
+        operator = request.user.get_full_name() or request.user.get_username()
+        eligible = SalesOrder.objects.filter(status='COMPLETED', is_archived=False)
+        archived_count = eligible.count()
+        eligible.update(
+            is_archived=True,
+            archived_at=timezone.now(),
+            archived_by=operator,
+        )
+        return Response({'archived_count': archived_count})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsManager])
+    def archive(self, request, pk=None):
+        """单条归档（manager only）。要求 status=COMPLETED。"""
+        from django.utils import timezone
+        order = self.get_object()
+        if order.is_archived:
+            return Response({'detail': '该销售单已归档'}, status=400)
+        if order.status != 'COMPLETED':
+            return Response({'detail': '仅 COMPLETED 状态的销售单可归档'}, status=400)
+        operator = request.user.get_full_name() or request.user.get_username()
+        order.is_archived = True
+        order.archived_at = timezone.now()
+        order.archived_by = operator
+        order.save(update_fields=['is_archived', 'archived_at', 'archived_by'])
+        return Response(SalesOrderSerializer(order, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsManager])
+    def unarchive(self, request, pk=None):
+        """单条取消归档（manager only）。取消后订单可再次编辑。"""
+        order = self.get_object()
+        if not order.is_archived:
+            return Response({'detail': '该销售单未归档'}, status=400)
+        order.is_archived = False
+        order.archived_at = None
+        order.archived_by = ''
+        order.save(update_fields=['is_archived', 'archived_at', 'archived_by'])
+        return Response(SalesOrderSerializer(order, context={'request': request}).data)
 
 
 class CustomerPreferredProductViewSet(mixins.ListModelMixin,

@@ -49,6 +49,11 @@ export interface PurchaseOrderResponse {
   expected_arrival_date?: string | null;
   items: PurchaseOrderItemResponse[];
   events?: PurchaseOrderEventResponse[];
+  /** 2026-06-19 归档机制（详见 docs/PRD.md §9.4）。归档单 read-only，
+   *  通过 archive / unarchive endpoint 切换，不走 PATCH。 */
+  is_archived?: boolean;
+  archived_at?: string | null;
+  archived_by?: string;
 }
 
 export interface PurchaseOrdersFilters {
@@ -61,6 +66,10 @@ export interface PurchaseOrdersFilters {
   created_from?: string;
   created_to?: string;
   ordering?: string;
+  /** 2026-06-19 归档过滤（详见 docs/PRD.md §9.4）：
+   *    undefined / false → 仅未归档（默认）
+   *    true              → 仅已归档（"查看已归档"复选框开启）。 */
+  is_archived?: boolean;
 }
 
 function normalize(raw: any): PurchaseOrderResponse {

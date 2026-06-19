@@ -313,11 +313,11 @@ def _build_partner_note(*, company_name, partner_label, rows, today_str, frame_w
 def _build_items_table(rows, frame_width):
     """渲染明细表——表头 + N 行明细 + 合计行。"""
     # 列宽分配：合同号 / 型号 / 规格备注 / 数量 / 单位 / 运单号
-    col_ratios = [0.13, 0.22, 0.30, 0.10, 0.08, 0.17]
+    col_ratios = [0.20, 0.22, 0.30, 0.10, 0.08, 0.17]
     col_widths = [frame_width * r for r in col_ratios]
 
     header = [
-        Paragraph('合同号', _CELL_CENTER_STYLE),
+        Paragraph('订单号', _CELL_CENTER_STYLE),
         Paragraph('型号', _CELL_CENTER_STYLE),
         Paragraph('规格备注', _CELL_CENTER_STYLE),
         Paragraph('数量', _CELL_CENTER_STYLE),

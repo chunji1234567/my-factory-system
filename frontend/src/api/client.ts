@@ -77,6 +77,8 @@ export interface SalesOrdersQueryParams extends ListQueryParams {
   partner_name?: string;
   created_from?: string; // YYYY-MM-DD
   created_to?: string;   // YYYY-MM-DD
+  /** 2026-06-19 归档机制：不传或 false → 仅未归档；true → 仅已归档（详见 §9.4）。 */
+  is_archived?: boolean;
 }
 
 /** 采购订单列表查询参数，与后端 PurchaseOrderFilter 对齐。 */
@@ -86,6 +88,8 @@ export interface PurchaseOrdersQueryParams extends ListQueryParams {
   order_no?: string;
   created_from?: string;
   created_to?: string;
+  /** 2026-06-19 归档机制：同 SalesOrdersQueryParams（详见 §9.4）。 */
+  is_archived?: boolean;
 }
 
 /** 发货日志列表查询参数，与后端 ShippingLogFilter 对齐。 */
@@ -443,6 +447,20 @@ export const api = {
       body: JSON.stringify({ status }),
     });
   },
+  // ----- 销售订单归档（2026-06-19，详见 docs/PRD.md §9.4）-----
+  /** 批量归档所有 status=COMPLETED 且 is_archived=False 的销售单。manager only。
+   *  返回 `{ archived_count: N }`。 */
+  archiveSalesOrdersBatch() {
+    return apiFetch(`/api/business/sales-orders/archive-batch/`, { method: 'POST' });
+  },
+  /** 单条归档。要求 status=COMPLETED，否则 400。manager only。 */
+  archiveSalesOrder(orderId: number) {
+    return apiFetch(`/api/business/sales-orders/${orderId}/archive/`, { method: 'POST' });
+  },
+  /** 单条取消归档。取消后订单可再次编辑。manager only。 */
+  unarchiveSalesOrder(orderId: number) {
+    return apiFetch(`/api/business/sales-orders/${orderId}/unarchive/`, { method: 'POST' });
+  },
   getPurchaseOrders(params: PurchaseOrdersQueryParams | string = '') {
     const qs = typeof params === 'string' ? params : toQueryString(params);
     return apiFetch(`/api/business/purchase-orders/${qs}`);
@@ -490,6 +508,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+  // ----- 采购订单归档（2026-06-19，详见 docs/PRD.md §9.4）-----
+  /** 批量归档所有 status=RECEIVED 且 is_archived=False 的采购单。manager only。 */
+  archivePurchaseOrdersBatch() {
+    return apiFetch(`/api/business/purchase-orders/archive-batch/`, { method: 'POST' });
+  },
+  /** 单条归档。要求 status=RECEIVED，否则 400。manager only。 */
+  archivePurchaseOrder(orderId: number) {
+    return apiFetch(`/api/business/purchase-orders/${orderId}/archive/`, { method: 'POST' });
+  },
+  /** 单条取消归档。 */
+  unarchivePurchaseOrder(orderId: number) {
+    return apiFetch(`/api/business/purchase-orders/${orderId}/unarchive/`, { method: 'POST' });
   },
   createStockAdjustment(payload: { product: number; adjustment_type: string; quantity: number; note?: string }) {
     return apiFetch(`/api/business/stock-adjustments/`, {
