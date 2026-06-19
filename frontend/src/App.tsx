@@ -12,6 +12,7 @@ import LoginForm from './components/LoginForm';
 import { useAuth } from './context/AuthContext';
 import { useProducts } from './hooks/useProducts';
 import { Sidebar } from './components/Sidebar';
+import { Toaster } from './components/Toaster';
 import { useCategories } from './hooks/useCategories';
 import { usePartners } from './hooks/usePartners';
 import { panelConfig, type PanelKey, type InventoryProduct } from './types';
@@ -48,14 +49,39 @@ function App() {
   const isShipper = Boolean(user?.roles?.includes('shipper'));
   // products / categories 是 manager+warehouse 的主数据（后端权限同口径）；
   // shipper 不消费这两个接口，避免发出 403 请求。
-  const productsQuery = useProducts(Boolean(accessToken) && (isManager || isWarehouse));
-  const categoriesQuery = useCategories(Boolean(accessToken) && (isManager || isWarehouse));
+  //
+  // 分页策略（2026-06-19 方案 A，详见 docs/PRD.md §5.4）：
+  //   这三个 hook 都走"全量预取 + 客户端搜索/分页"模式——一次拉够、本地切片。
+  //   后端 StandardPagination.max_page_size 同步抬到 2000。
+  //   当前上限按"5 年增长上限"留足空间：
+  //     useProducts    pageSize: 2000   原材料 SKU 估计天花板 ~2000
+  //     usePartners    pageSize: 1000   合作方估计天花板 ~1000
+  //     useCategories  pageSize: 500    分类几年内都不会破 100
+  //
+  //   每个 hook 都挂 warnOnOverflow：真实 totalCount > pageSize 时 toast.warning
+  //   一次，提醒需要升级方案 B（InventoryPanel 改服务端分页 + SearchableSelect
+  //   远程搜索）。早期最大的暗坑就是静默截断——必须有兜底告警。
+  const productsQuery = useProducts({
+    enabled: Boolean(accessToken) && (isManager || isWarehouse),
+    pageSize: 2000,
+    warnOnOverflow: { label: '物料' },
+  });
+  const categoriesQuery = useCategories({
+    enabled: Boolean(accessToken) && (isManager || isWarehouse),
+    pageSize: 500,
+    warnOnOverflow: { label: '分类' },
+  });
   // /api/core/partners/ 后端权限 IsManager only（详见 docs/PRD.md §2.2）。
   // warehouse / shipper 的面板不需要 partners 列表——
   //   - WarehouseReceivingPanel 仅作为 dead prop 接收，内部不消费；
   //   - ShippingPanel 通过 sales_item.order.partner_name 嵌套字段拿合作方名。
   // 因此这里只在 manager 时触发，避免 warehouse/shipper 静默 403。
-  const partnersQuery = usePartners(Boolean(accessToken) && isManager);
+  // 销售/采购下单时用的 PartnerSelect 也依赖这份全量列表做模糊匹配。
+  const partnersQuery = usePartners({
+    enabled: Boolean(accessToken) && isManager,
+    pageSize: 1000,
+    warnOnOverflow: { label: '合作方' },
+  });
   // 注：useSalesOrders / useShippingLogs / usePurchaseOrders 都不在 App.tsx 中央获取——
   // SalesOrdersPanel / ShippingPanel / PurchasePanel / WarehouseReceivingPanel 各自
   // 自管对应 hook（带 filter + pagination）。这样 panel 切换时也不会强制全量重拉。
@@ -120,6 +146,9 @@ function App() {
 
   return (
     <div className="min-h-screen bg-surface-subtle">
+      {/* 全局 toast 通知挂载点 —— 命令式 import { toast } from 'utils/toast' 任意位置调用 */}
+      <Toaster />
+
       {/* 侧边导航：桌面 fixed 永久展示；移动端 mobileNavOpen 控制抽屉 */}
       <Sidebar
         allowedPanels={allowedPanels}

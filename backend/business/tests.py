@@ -984,6 +984,143 @@ class ProductionRecordTest(TestCase):
             self.assertEqual(resp.status_code, 405, f'{method.upper()} 应返回 405')
 
 
+class ModelLayerValidationTest(TestCase):
+    """2026-06-19 漏洞 2 加固：验证 4 个 append-only 模型的 model.clean() 在
+    raw ORM 路径也生效——admin / 数据脚本 / Django shell 不能绕过校验。
+
+    覆盖：
+      - StockAdjustment.quantity <= 0           → ValidationError
+      - ReceivingLog.quantity_received <= 0     → ValidationError
+      - ReceivingLog.quantity_received > 剩余  → ValidationError
+      - ShippingLog.quantity_shipped <= 0       → ValidationError
+      - ShippingLog.quantity_shipped > 可发     → ValidationError
+      - ProductionRecord.quantity <= 0          → ValidationError
+      - ProductionRecord 三件不齐                → ValidationError
+      - ProductionRecord 过排产                 → ValidationError
+
+    上层 serializer 同口径 validate 已有 API 测试（test_api_rejects_overproduction
+    等），这里专门压 raw ORM 路径——没有 serializer 帮你挡的时候，model 层兜底。
+    """
+
+    def setUp(self):
+        # 最小可工作的"三件套 + 销售明细"
+        self.cat_raw = Category.objects.create(name='RAW', category_type='RAW_MATERIAL')
+        self.cat_shell = Category.objects.create(name='SHELL', category_type='SELF_MADE')
+        self.cat_cable = Category.objects.create(name='CABLE', category_type='CABLE')
+        self.raw = Product.objects.create(
+            category=self.cat_raw, internal_code='V-RAW', model_name='RAW',
+            stock_quantity=Decimal('100'),
+        )
+        self.shell = Product.objects.create(
+            category=self.cat_shell, internal_code='V-SH', model_name='SHELL',
+            stock_quantity=Decimal('100'),
+        )
+        self.cable = Product.objects.create(
+            category=self.cat_cable, internal_code='V-CA', model_name='CABLE',
+            stock_quantity=Decimal('100'),
+        )
+        from core.models import PcbPlan, PcbPlanMaterial
+        self.plan = PcbPlan.objects.create(name='V-PLAN', code='V')
+        PcbPlanMaterial.objects.create(plan=self.plan, material=self.raw, quantity_per_unit=Decimal('1'))
+
+        self.partner = Partner.objects.create(name='V-客户', partner_type='CUSTOMER')
+        self.supplier = Partner.objects.create(name='V-供应商', partner_type='SUPPLIER')
+        self.so = SalesOrder.objects.create(order_no='SO-V-001', partner=self.partner, operator='v')
+        self.si = SalesOrderItem.objects.create(
+            order=self.so, product=self.shell, pcb_plan=self.plan, cable=self.cable,
+            custom_product_name='V', price=Decimal('1'), quantity=Decimal('50'),
+        )
+        self.po = PurchaseOrder.objects.create(order_no='PO-V-001', partner=self.supplier, operator='v')
+        self.po_item = PurchaseOrderItem.objects.create(
+            order=self.po, product=self.raw, price=Decimal('1'), quantity=Decimal('100'),
+        )
+
+    # ---- StockAdjustment ----
+    def test_stock_adjustment_zero_quantity_raises(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            StockAdjustment.objects.create(
+                product=self.raw, adjustment_type='MANUAL_IN',
+                quantity=Decimal('0'), operator='v',
+            )
+
+    def test_stock_adjustment_negative_quantity_raises(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            StockAdjustment.objects.create(
+                product=self.raw, adjustment_type='MANUAL_OUT',
+                quantity=Decimal('-5'), operator='v',
+            )
+
+    # ---- ReceivingLog ----
+    def test_receiving_log_zero_quantity_raises(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            ReceivingLog.objects.create(
+                purchase_item=self.po_item, quantity_received=Decimal('0'), operator='v',
+            )
+
+    def test_receiving_log_over_remaining_raises(self):
+        from django.core.exceptions import ValidationError
+        # 已收 80，剩 20。再收 30 → 拒
+        ReceivingLog.objects.create(
+            purchase_item=self.po_item, quantity_received=Decimal('80'), operator='v',
+        )
+        with self.assertRaises(ValidationError):
+            ReceivingLog.objects.create(
+                purchase_item=self.po_item, quantity_received=Decimal('30'), operator='v',
+            )
+
+    # ---- ShippingLog ----
+    def test_shipping_log_zero_quantity_raises(self):
+        from django.core.exceptions import ValidationError
+        # 先排产 30，可发 = min(50, 30) - 0 = 30
+        ProductionRecord.objects.create(sales_item=self.si, quantity=Decimal('30'), operator='v')
+        with self.assertRaises(ValidationError):
+            ShippingLog.objects.create(
+                sales_item=self.si, quantity_shipped=Decimal('0'), operator='v',
+            )
+
+    def test_shipping_log_over_available_raises(self):
+        from django.core.exceptions import ValidationError
+        # 排产 20，可发 = min(50, 20) - 0 = 20。发 30 → 拒
+        ProductionRecord.objects.create(sales_item=self.si, quantity=Decimal('20'), operator='v')
+        with self.assertRaises(ValidationError):
+            ShippingLog.objects.create(
+                sales_item=self.si, quantity_shipped=Decimal('30'), operator='v',
+            )
+
+    # ---- ProductionRecord ----
+    def test_production_record_zero_quantity_raises(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            ProductionRecord.objects.create(
+                sales_item=self.si, quantity=Decimal('0'), operator='v',
+            )
+
+    def test_production_record_overproduction_raises(self):
+        from django.core.exceptions import ValidationError
+        # 已排 40，订单总 50。再排 20 → 60 > 50，拒
+        ProductionRecord.objects.create(sales_item=self.si, quantity=Decimal('40'), operator='v')
+        with self.assertRaises(ValidationError):
+            ProductionRecord.objects.create(
+                sales_item=self.si, quantity=Decimal('20'), operator='v',
+            )
+
+    def test_production_record_missing_bom_pieces_raises(self):
+        """三件套缺一不可——无 pcb_plan 的明细不能排产。"""
+        from django.core.exceptions import ValidationError
+        broken = SalesOrderItem.objects.create(
+            order=self.so, product=self.shell, cable=self.cable,
+            # 故意不挂 pcb_plan
+            custom_product_name='BROKEN', price=Decimal('1'), quantity=Decimal('10'),
+        )
+        with self.assertRaises(ValidationError):
+            ProductionRecord.objects.create(
+                sales_item=broken, quantity=Decimal('5'), operator='v',
+            )
+
+
 class PcbPlanAPITest(APITestCase):
     """PcbPlan CRUD API 与权限测试（BOM-2.0）。
 

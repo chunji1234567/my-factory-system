@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { api } from '../../api/client';
+import { toast } from '../../utils/toast';
 import { useSalesOrders } from '../../hooks/useSalesOrders';
 import Modal from '../common/Modal';
 import { Card, PageHeader, Section, StatTriple, BomTriple, ActionBar, Pill, DueDatePill } from '../primitives';
@@ -150,7 +151,7 @@ export default function ProductionPanel() {
 
   const openConfirm = () => {
     if (pendingSubmissions.length === 0) {
-      alert('请先在卡片里填写要排产的数量（或点"全部按建议填满"）');
+      toast.warning('请先在卡片里填写要排产的数量（或点"全部按建议填满"）');
       return;
     }
     setSubmitError(null);

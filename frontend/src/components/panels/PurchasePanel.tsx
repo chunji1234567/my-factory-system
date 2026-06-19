@@ -7,6 +7,7 @@ import type { OrderItemDraft } from '../common/OrderItemsEditor';
 import Modal from '../common/Modal';
 import Pagination from '../common/Pagination';
 import { resolvePartnerId, formatPartner } from '../../utils/orderUtils';
+import { toast } from '../../utils/toast';
 import { usePurchaseOrders, PurchaseOrdersFilters } from '../../hooks/usePurchaseOrders';
 import {
   Card,
@@ -16,6 +17,7 @@ import {
   StatusPillFilterRow,
   OrderListRow,
   ModalFooterButtons,
+  DestructiveButton,
 } from '../primitives';
 
 /**
@@ -173,7 +175,7 @@ export default function PurchasePanel({
       setEventModal({ ...eventModal, open: false });
       onRefresh();
     } catch (err: any) {
-      alert('保存失败: ' + err.message);
+      toast.error('保存失败：' + err.message);
     } finally {
       setIsSaving(false);
     }
@@ -211,14 +213,18 @@ export default function PurchasePanel({
 
   const handleSubmit = async () => {
     const sId = form.supplierId ?? resolvePartnerId(form.supplierField, supplierOptions);
-    if (!sId) return alert('请选择有效的供应商');
+    if (!sId) {
+      toast.warning('请选择有效的供应商');
+      return;
+    }
 
     // 价格可选；数量必填且 > 0。采购明细不需要校验三件套（那是销售）。
     const validItems = form.items.filter(
       (item) => item.product && Number(item.quantity) > 0,
     );
     if (validItems.length === 0) {
-      return alert('订单至少需要包含一项有效明细，且数量大于 0');
+      toast.warning('订单至少需要包含一项有效明细，且数量大于 0');
+      return;
     }
 
     try {
@@ -249,11 +255,55 @@ export default function PurchasePanel({
       setModal({ ...modal, open: false });
       onRefresh();
     } catch (e: any) {
-      alert(e.message);
+      toast.error(e?.message ?? '提交失败');
     } finally {
       setIsSaving(false);
     }
   };
+
+  /**
+   * 删除采购订单（仅 ORDERED 状态可调用）。
+   *
+   * 安全机制（详见 SalesOrdersPanel.handleDeleteOrder 同款注释）：
+   *   - 仅 status === 'ORDERED'：PARTIAL/RECEIVED 已有 ReceivingLog 改过 stock_quantity，
+   *     删订单会留下"消失的入库"审计断点
+   *   - CASCADE 链路自动归位 Partner.balance（应付金额跟着减）
+   *   - 一次 window.confirm 提示单号 + 供应商 + 明细数
+   */
+  const handleDeleteOrder = async () => {
+    if (modal.mode !== 'edit' || !modal.draftId) return;
+    const order = ordersQuery.data.find((o) => o.id === modal.draftId);
+    if (!order) return;
+    if (order.status !== 'ORDERED') {
+      toast.info('只能删除"已下单"状态的采购单');
+      return;
+    }
+    const itemCount = order.items?.length ?? 0;
+    if (!window.confirm(
+      `确认删除采购单？\n\n` +
+      `单号：${order.order_no}\n` +
+      `供应商：${order.partner_name ?? `#${order.partner}`}\n` +
+      `明细数：${itemCount} 条\n\n` +
+      `此操作不可撤销。删除后供应商应付余额会自动减去该订单金额。`,
+    )) return;
+    try {
+      setIsSaving(true);
+      await api.deletePurchaseOrder(modal.draftId);
+      setModal({ ...modal, open: false });
+      onRefresh();
+      toast.success('采购单已删除');
+    } catch (e: any) {
+      toast.error(`删除失败：${e?.message ?? '未知错误'}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  /** 当前编辑中的订单，用来判断 status 决定删除按钮是否禁用。 */
+  const editingOrder = modal.mode === 'edit' && modal.draftId
+    ? ordersQuery.data.find((o) => o.id === modal.draftId)
+    : null;
+  const canDelete = !!editingOrder && editingOrder.status === 'ORDERED';
 
   return (
     <div className="space-y-section-gap animate-in fade-in duration-500 pb-20">
@@ -364,6 +414,21 @@ export default function PurchasePanel({
             onCancel={() => setModal({ ...modal, open: false })}
             onSubmit={handleSubmit}
             isSaving={isSaving}
+            destructiveAction={
+              modal.mode === 'edit' ? (
+                <DestructiveButton
+                  onClick={handleDeleteOrder}
+                  disabled={!canDelete || isSaving}
+                  title={
+                    canDelete
+                      ? '删除此采购单（不可撤销）'
+                      : '仅"已下单"状态的采购单可删除——已有入库时不允许'
+                  }
+                >
+                  删除订单
+                </DestructiveButton>
+              ) : null
+            }
           />
         }
       >

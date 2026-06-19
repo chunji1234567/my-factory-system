@@ -183,7 +183,10 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    # 2026-06-18：从默认 PageNumberPagination 切到 StandardPagination，
+    # 解锁客户端 `?page_size=N` override（详见 business/api/pagination.py）。
+    # 默认 page_size = 20，最大 500。
+    'DEFAULT_PAGINATION_CLASS': 'business.api.pagination.StandardPagination',
     'PAGE_SIZE': 20,
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',

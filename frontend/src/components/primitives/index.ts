@@ -23,4 +23,4 @@ export { DueDatePill } from './DueDatePill';
 export { SearchableSelect } from './SearchableSelect';
 export { StatusPillFilterRow } from './StatusPillFilterRow';
 export { OrderListRow } from './OrderListRow';
-export { ModalFooterButtons } from './ModalFooterButtons';
+export { ModalFooterButtons, DestructiveButton } from './ModalFooterButtons';

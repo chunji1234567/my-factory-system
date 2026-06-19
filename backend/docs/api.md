@@ -56,7 +56,7 @@ Django Groups：`manager` / `warehouse` / `shipper`。`superuser` 视同 manager
 **关键约束**：
 - 编辑明细数量时 `quantity < shipped_quantity` 抛 ValidationError
 - 状态机：`ORDERED` → `PRODUCING` → `SHIPPED` → `COMPLETED`，PATCH `/status/` **仅前进一档**
-- `order_no` 未传时后端自动生成 `SO{year}-{NNNN}`（`select_for_update + 取最大尾号 +1`）
+- `order_no` 未传时后端自动生成 `SO-yyyymmdd-NNNN` —— 日期段标识创建日期，4 位序号**年内全局连续、跨年重置**（`select_for_update + 取年最大尾号 +1`，2026-06-19 起；旧版本 3 位按日重置）
 
 ### 4.2 采购订单
 

@@ -23,7 +23,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import F, QuerySet, Sum
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 from .models import (
@@ -269,10 +269,17 @@ def auto_consume_on_production_record_create(sender, instance, created, **kwargs
         # (3) PCB 方案展开：N 条
         if item.pcb_plan is not None:
             for plan_material in item.pcb_plan.materials.all():
+                adjust_qty = qty * plan_material.quantity_per_unit
+                # quantity_per_unit > 0 仅在 serializer 校验，model 层未强制；
+                # 若历史脏数据存在 0 / 负值，跳过写 StockAdjustment——
+                # 否则会被 StockAdjustment.clean()（2026-06-19 漏洞 2 加固）拒绝，
+                # 导致整条 ProductionRecord 创建失败。
+                if adjust_qty <= 0:
+                    continue
                 StockAdjustment.objects.create(
                     product=plan_material.material,
                     adjustment_type='PRODUCE_CONSUME',
-                    quantity=qty * plan_material.quantity_per_unit,
+                    quantity=adjust_qty,
                     note=(
                         f'{note_prefix} 消耗 [{item.pcb_plan.name}] '
                         f'{plan_material.material.model_name}'

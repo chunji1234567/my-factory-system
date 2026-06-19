@@ -7,6 +7,7 @@ import type { OrderItemDraft } from '../common/OrderItemsEditor';
 import Modal from '../common/Modal';
 import Pagination from '../common/Pagination';
 import { resolvePartnerId, formatPartner } from '../../utils/orderUtils';
+import { toast } from '../../utils/toast';
 import { useSalesOrders, SalesOrdersFilters } from '../../hooks/useSalesOrders';
 import { useCustomerPreferredProducts } from '../../hooks/useCustomerPreferredProducts';
 import { usePcbPlans } from '../../hooks/usePcbPlans';
@@ -18,6 +19,7 @@ import {
   StatusPillFilterRow,
   OrderListRow,
   ModalFooterButtons,
+  DestructiveButton,
 } from '../primitives';
 
 /**
@@ -182,7 +184,7 @@ export default function SalesOrdersPanel({
       setEventModal({ ...eventModal, open: false });
       onRefresh();
     } catch (err: any) {
-      alert('保存失败: ' + err.message);
+      toast.error('保存失败：' + err.message);
     } finally {
       setIsSaving(false);
     }
@@ -230,14 +232,18 @@ export default function SalesOrdersPanel({
 
   const handleSubmit = async () => {
     const cId = form.customerId ?? resolvePartnerId(form.customerField, customerOptions);
-    if (!cId) return alert('请选择有效的客户');
+    if (!cId) {
+      toast.warning('请选择有效的客户');
+      return;
+    }
 
     // BOM-2.0：销售明细必须挂三件；价格可选（数量必填且 > 0）。
     const validItems = form.items.filter(
       (item) => item.product && item.pcbPlan && item.cable && Number(item.quantity) > 0,
     );
     if (validItems.length === 0) {
-      return alert('订单明细不能为空，且每条必须选齐外壳 + PCB 方案 + 线材，并填写数量');
+      toast.warning('订单明细不能为空，且每条必须选齐外壳 + PCB 方案 + 线材，并填写数量');
+      return;
     }
 
     try {
@@ -296,11 +302,58 @@ export default function SalesOrdersPanel({
       setModal({ ...modal, open: false });
       onRefresh();
     } catch (e: any) {
-      alert(e.message);
+      toast.error(e?.message ?? '提交失败');
     } finally {
       setIsSaving(false);
     }
   };
+
+  /**
+   * 删除销售订单（仅 ORDERED 状态可调用）。
+   *
+   * 安全机制（详见 docs/PRD.md §3.1 与本次会话 audit）：
+   *   1. 仅 status === 'ORDERED' 才允许——更高级状态的订单存在 ProductionRecord
+   *      / ShippingLog / PRODUCE_CONSUME StockAdjustment，删订单会留下"消失的扣料/
+   *      发货"审计断点。signal `auto_promote_to_producing` 保证 ORDERED ↔ 无 PR
+   *   2. CASCADE 链路自动归位 Partner.balance：删 SalesOrder → SalesOrderItem
+   *      跟着删 → PartnerLedgerEntry(sales_order OneToOne FK) 跟着删 → balance
+   *      property 重新 Sum
+   *   3. 一次 window.confirm 提示订单号 + 客户 + 明细数 + 不可撤销
+   */
+  const handleDeleteOrder = async () => {
+    if (modal.mode !== 'edit' || !modal.draftId) return;
+    const order = ordersQuery.data.find((o) => o.id === modal.draftId);
+    if (!order) return;
+    if (order.status !== 'ORDERED') {
+      toast.info('只能删除"待处理"状态的销售单');
+      return;
+    }
+    const itemCount = order.items?.length ?? 0;
+    if (!window.confirm(
+      `确认删除销售单？\n\n` +
+      `单号：${order.order_no}\n` +
+      `客户：${order.partner_name ?? `#${order.partner}`}\n` +
+      `明细数：${itemCount} 条\n\n` +
+      `此操作不可撤销。删除后客户应收余额会自动减去该订单金额。`,
+    )) return;
+    try {
+      setIsSaving(true);
+      await api.deleteSalesOrder(modal.draftId);
+      setModal({ ...modal, open: false });
+      onRefresh();
+      toast.success('销售单已删除');
+    } catch (e: any) {
+      toast.error(`删除失败：${e?.message ?? '未知错误'}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  /** 当前编辑中的订单（拿来判断 status，决定删除按钮是否禁用）。 */
+  const editingOrder = modal.mode === 'edit' && modal.draftId
+    ? ordersQuery.data.find((o) => o.id === modal.draftId)
+    : null;
+  const canDelete = !!editingOrder && editingOrder.status === 'ORDERED';
 
   return (
     <div className="space-y-section-gap animate-in fade-in duration-500 pb-20">
@@ -409,6 +462,21 @@ export default function SalesOrdersPanel({
             onCancel={() => setModal({ ...modal, open: false })}
             onSubmit={handleSubmit}
             isSaving={isSaving}
+            destructiveAction={
+              modal.mode === 'edit' ? (
+                <DestructiveButton
+                  onClick={handleDeleteOrder}
+                  disabled={!canDelete || isSaving}
+                  title={
+                    canDelete
+                      ? '删除此销售单（不可撤销）'
+                      : '仅"待处理"状态的销售单可删除——已有排产/发货时不允许'
+                  }
+                >
+                  删除订单
+                </DestructiveButton>
+              ) : null
+            }
           />
         }
       >

@@ -1,5 +1,3 @@
-from django.contrib.auth.models import Group
-
 MANAGER_GROUP = 'manager'
 WAREHOUSE_GROUP = 'warehouse'
 SHIPPER_GROUP = 'shipper'

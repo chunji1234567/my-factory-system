@@ -5,6 +5,7 @@ import { useFinanceTransactions } from '../../../hooks/useFinanceTransactions';
 import Pagination from '../../common/Pagination';
 import { Card, Section, Pill, StatTriple, ActionBar } from '../../primitives';
 import { formatMoney } from '../../../utils/money';
+import { toast } from '../../../utils/toast';
 import { LedgerTable } from './LedgerTable';
 import { TransactionFormModal } from './TransactionFormModal';
 import type { FinanceTransactionResponse } from '../../../hooks/useFinanceTransactions';
@@ -150,7 +151,7 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
       await txnsQuery.reload();
       onPartnerRefresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : '删除失败');
+      toast.error(err instanceof Error ? err.message : '删除失败');
     }
   };
 
@@ -203,7 +204,7 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '导出失败');
+      toast.error(err instanceof Error ? err.message : '导出失败');
     } finally {
       setExporting(false);
     }

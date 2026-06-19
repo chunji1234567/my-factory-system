@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { PaginatedResponse } from '../api/client';
+import { toast } from '../utils/toast';
 
 // 列表 hook 的通用范式——由 useSalesOrders 落地后抽到这里，供其他列表 hook 复用。
 // 详见 rules/frontend-rules.md §3.1。
@@ -14,11 +15,28 @@ export interface PaginationMeta {
   hasPrev: boolean;
 }
 
+/** "全量预取"型 hook 的溢出告警配置（详见 useListResource 文档）。
+ *
+ *  使用场景：App.tsx 把 useProducts / usePartners / useCategories 当作"一次
+ *  拉够、本地分页 + 本地搜索"用，pageSize 故意拉到 2000 / 1000 / 500 这种大值。
+ *  如果真实 totalCount 超了 pageSize，就会**静默截断** → InventoryPanel 看不到
+ *  501+ 的物料 / SearchableSelect 选不到 1001+ 的合作方。
+ *
+ *  本选项保证溢出时 toast.warning 告警**一次**（同一组件实例内只发一次），
+ *  让你知道该改服务端分页了（方案 B）。详见 docs/PRD.md §5.4 分页约定。
+ */
+export interface WarnOnOverflowOptions {
+  /** 用户可读的数据名字，如 "物料"、"合作方"、"分类"。会拼到提示文案里。 */
+  label: string;
+}
+
 export interface UseListHookOptions<TFilters extends object = object> {
   enabled?: boolean;
   page?: number;
   pageSize?: number;
   filters?: TFilters;
+  /** 见 WarnOnOverflowOptions 文档。仅"全量预取"调用点才需要传。 */
+  warnOnOverflow?: WarnOnOverflowOptions;
 }
 
 export interface UseListHookResult<TItem> {
@@ -55,7 +73,7 @@ export function useListResource<TItem, TFilters extends object>(
   config: InternalConfig<TItem, TFilters>,
 ): UseListHookResult<TItem> {
   const {
-    options: { enabled = true, page = 1, pageSize = 30, filters },
+    options: { enabled = true, page = 1, pageSize = 30, filters, warnOnOverflow },
     toQueryParams,
     fetcher,
     normalize,
@@ -65,6 +83,10 @@ export function useListResource<TItem, TFilters extends object>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [totalCount, setTotalCount] = useState(0);
+
+  // 溢出告警："本组件实例只 toast 一次"——避免每次刷新 / refetch 都弹。
+  // 浏览器整体刷新会重新挂载组件、ref 重置，仍会再警告一次（这是想要的）。
+  const overflowWarnedRef = useRef(false);
 
   // fetcher / normalize / toQueryParams 都通过 ref 持有——每次 render 写入最新值，
   // 但 fetchData 的依赖里不含它们，所以不会触发重 fetch。
@@ -111,6 +133,22 @@ export function useListResource<TItem, TFilters extends object>(
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // 溢出告警——totalCount > pageSize 时单次 toast.warning。
+  // 故意不放 fetchData 里，避免与 setLoading / setData 同 tick fire toast 干扰渲染。
+  useEffect(() => {
+    if (
+      warnOnOverflow &&
+      !overflowWarnedRef.current &&
+      totalCount > pageSize &&
+      totalCount > 0
+    ) {
+      overflowWarnedRef.current = true;
+      toast.warning(
+        `${warnOnOverflow.label}总数 ${totalCount} 超过当前加载上限 ${pageSize}，部分数据未显示。请联系开发升级分页方案。`,
+      );
+    }
+  }, [warnOnOverflow, totalCount, pageSize]);
 
   const totalPages = pageSize > 0 ? Math.max(1, Math.ceil(totalCount / pageSize)) : 1;
   const pagination: PaginationMeta = {

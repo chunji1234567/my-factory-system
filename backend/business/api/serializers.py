@@ -4,7 +4,6 @@ from django.db import transaction
 from django.db.models import Sum
 from rest_framework import serializers
 
-from core.models import PcbPlan
 from core.serializers import ProductSerializer, PcbPlanSerializer
 from business.models import (
     PurchaseOrder,
@@ -29,35 +28,49 @@ def _resolve_operator(validated_data, request):
         validated_data['operator'] = request.user.get_full_name() or request.user.get_username()
 
 
-def _generate_sequential_order_no(model_cls, prefix, width=3):
-    """根据前缀生成下一条订单号，格式 ``<prefix>-<NNN>``，NNN 默认 3 位。
+def _generate_sequential_order_no(model_cls, scan_prefix, full_prefix, width=4):
+    """生成下一条订单号，序号**年内连续**，跨年重置。
 
-    2026-06-18 起新格式：``SO-yyyymmdd-NNN`` / ``PO-yyyymmdd-NNN``——
-    prefix 包含日期（"SO-20260618"），序号按日重置。详见
-    docs/PRD.md 关于订单号约定的讨论。
+    2026-06-19 改造后新格式：``SO-yyyymmdd-NNNN`` / ``PO-yyyymmdd-NNNN``——
+    日期段保留可读性（看一眼就知道哪天的单），序号 4 位且按年累加，
+    永不按日重置。例如：
 
-    必须在 ``transaction.atomic()`` 中调用——内部用 ``select_for_update()``
-    锁定当前最大尾号那一行，等本事务提交后其他事务才能读到新最大值，
-    从而避免并发碰撞 ``order_no`` 唯一约束。
+        SO-20260619-0042
+        SO-20260620-0043   ← 新一天，序号继续 +1，不归零
+        SO-20260620-0044
+        ...
+        SO-20270101-0001   ← 跨到 2027 年，序号重新从 1 开始
 
-    回退策略：如果尾号无法解析（例如历史脏数据），从 1 重新开始。
-    历史数据（旧格式 ``SO2026-0001``）不受影响——新 prefix 带 "SO-" 横线，
-    与旧 prefix "SO2026" 不前缀相交，select_for_update 不会冲突。
+    参数：
+      * ``scan_prefix``：'SO-2026' / 'PO-2026'，用于扫出当年所有订单
+      * ``full_prefix``：'SO-20260619' / 'PO-20260619'，拼到返回值前段
+      * ``width``：序号位数，默认 4 位（年单量 < 1 万足够；超了会自动撑宽
+        到 5 位、不会冲突，但单号长度不齐影响视觉，到那时该重新评估格式）
+
+    必须在 ``transaction.atomic()`` 中调用——``select_for_update()`` 锁定
+    当年所有订单行，避免并发并入碰撞 ``order_no`` 唯一约束。
+
+    实现注意（防混宽）：旧版本曾用 3 位序号；如果库里同时存在
+    ``SO-20260619-100``（旧）和 ``SO-20260619-0101``（新），按字符串
+    倒序排会把 100 排在 0101 之前（'1' > '0'），取到的不是真实最大值。
+    所以这里不依赖 SQL 排序，把候选拉到 Python 里逐条 int() 比大小——
+    年单量 < 10000 时这一步 < 100ms，可接受。
     """
-    latest = (
+    candidates = (
         model_cls.objects.select_for_update()
-        .filter(order_no__startswith=prefix)
-        .order_by('-order_no')
-        .first()
+        .filter(order_no__startswith=scan_prefix)
+        .values_list('order_no', flat=True)
     )
-    if latest:
+    max_counter = 0
+    for order_no in candidates:
         try:
-            counter = int(latest.order_no.split('-')[-1]) + 1
+            n = int(order_no.rsplit('-', 1)[-1])
         except (ValueError, IndexError):
-            counter = 1
-    else:
-        counter = 1
-    return f'{prefix}-{counter:0{width}d}'
+            continue
+        if n > max_counter:
+            max_counter = n
+    counter = max_counter + 1
+    return f'{full_prefix}-{counter:0{width}d}'
 
 
 class MonetaryMaskMixin:
@@ -193,11 +206,14 @@ class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
         return instance
 
     def _generate_order_no(self):
-        # 新格式 `PO-yyyymmdd-NNN`，序号按日重置 3 位（详见 docs/PRD.md 订单号约定）。
+        # 2026-06-19 改：`PO-yyyymmdd-NNNN`，序号年内连续 4 位（详见
+        # _generate_sequential_order_no 文档 + docs/PRD.md 订单号约定）。
         # 用 localdate() 取本地日期——工厂在中国时区，UTC 会跨日漂移。
         from django.utils import timezone
-        prefix = f'PO-{timezone.localdate().strftime("%Y%m%d")}'
-        return _generate_sequential_order_no(PurchaseOrder, prefix)
+        d = timezone.localdate()
+        scan_prefix = f'PO-{d.year}'
+        full_prefix = f'PO-{d.strftime("%Y%m%d")}'
+        return _generate_sequential_order_no(PurchaseOrder, scan_prefix, full_prefix)
 
 
 class ReceivingLogSerializer(serializers.ModelSerializer):
@@ -421,11 +437,14 @@ class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
         return instance
 
     def _generate_order_no(self):
-        # 新格式 `SO-yyyymmdd-NNN`，序号按日重置 3 位（详见 docs/PRD.md 订单号约定）。
+        # 2026-06-19 改：`SO-yyyymmdd-NNNN`，序号年内连续 4 位（详见
+        # _generate_sequential_order_no 文档 + docs/PRD.md 订单号约定）。
         # 用 localdate() 取本地日期——工厂在中国时区，UTC 会跨日漂移。
         from django.utils import timezone
-        prefix = f'SO-{timezone.localdate().strftime("%Y%m%d")}'
-        return _generate_sequential_order_no(SalesOrder, prefix)
+        d = timezone.localdate()
+        scan_prefix = f'SO-{d.year}'
+        full_prefix = f'SO-{d.strftime("%Y%m%d")}'
+        return _generate_sequential_order_no(SalesOrder, scan_prefix, full_prefix)
 
 
 class CustomerPreferredProductSerializer(serializers.ModelSerializer):

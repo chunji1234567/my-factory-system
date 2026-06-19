@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { api } from '../../api/client';
+import { toast } from '../../utils/toast';
 import { usePcbPlans, PcbPlanResponse } from '../../hooks/usePcbPlans';
 import { useProducts } from '../../hooks/useProducts';
 import Modal from '../common/Modal';
@@ -164,7 +165,7 @@ export default function PcbPlanPanel() {
 
   const handleSubmit = async () => {
     if (!form.name.trim()) {
-      alert('方案名称不能为空');
+      toast.warning('方案名称不能为空');
       return;
     }
     const validMaterials = form.materials.filter(
@@ -191,7 +192,7 @@ export default function PcbPlanPanel() {
       setModal({ open: false, mode: 'create', planId: null });
       plansQuery.reload();
     } catch (err: any) {
-      alert(`保存失败: ${err.message}`);
+      toast.error(`保存失败：${err.message}`);
     } finally {
       setIsSaving(false);
     }
@@ -204,7 +205,7 @@ export default function PcbPlanPanel() {
       await api.updatePcbPlan(plan.id, { is_active: !plan.is_active });
       plansQuery.reload();
     } catch (err: any) {
-      alert(`${verb}失败: ${err.message}`);
+      toast.error(`${verb}失败：${err.message}`);
     }
   };
 

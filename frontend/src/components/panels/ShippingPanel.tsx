@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { api } from '../../api/client';
+import { toast } from '../../utils/toast';
 import { useSalesOrders } from '../../hooks/useSalesOrders';
 import { useShippingLogs, ShippingLogResponse } from '../../hooks/useShippingLogs';
 import Modal from '../common/Modal';
@@ -197,12 +198,12 @@ function PendingTab() {
   const handleReuseLast = () => {
     const last = typeof localStorage !== 'undefined' ? localStorage.getItem(LAST_TRACKING_KEY) : null;
     if (last) setTrackingNo(last);
-    else alert('暂无上次的运单号');
+    else toast.info('暂无上次的运单号');
   };
 
   const openConfirm = () => {
     if (pending.length === 0) {
-      alert('请先在卡片里填写要发货的数量（或点"全部按可发量填满"）');
+      toast.warning('请先在卡片里填写要发货的数量（或点"全部按可发量填满"）');
       return;
     }
     setSubmitError(null);
@@ -298,7 +299,7 @@ function PendingTab() {
       ) : pendingRows.length === 0 ? (
         <Card>
           <p className="text-center text-caption text-ink-faint py-10">
-            🎉 当前没有可发货的销售明细
+             当前没有可发货的销售明细
           </p>
         </Card>
       ) : (
@@ -554,7 +555,7 @@ function HistoryTab() {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err?.message ?? '导出发货单失败');
+      toast.error(err?.message ?? '导出发货单失败');
     } finally {
       setExporting(false);
     }

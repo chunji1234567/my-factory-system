@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.db.models import Q, Sum
 from core.models import Partner, Product
@@ -126,14 +127,43 @@ class SalesOrderItem(models.Model):
         return max(0, min(self.quantity, self.produced_quantity) - self.shipped_quantity)
 
 class ShippingLog(models.Model):
-    """分批发货记录：核心自动化点"""
+    """分批发货记录：核心自动化点。
+
+    校验（2026-06-19 漏洞 2 加固，详见 §9.4 changelog）：
+      - quantity_shipped > 0
+      - quantity_shipped <= sales_item.available_to_ship_quantity
+    上层 ShippingLogSerializer 同口径再校一遍——API 路径出友好错误码，
+    model 层是 admin / raw ORM / 测试脚本的兜底防线。
+    Append-only：clean() 仅在新建时跑，update 路径（理论上不该走）不重校。
+    """
     sales_item = models.ForeignKey(SalesOrderItem, related_name='shippings', on_delete=models.CASCADE)
     quantity_shipped = models.DecimalField("本次实发数量", max_digits=12, decimal_places=2)
     tracking_no = models.CharField("物流单号/装车号", max_length=100, blank=True)
     shipped_at = models.DateTimeField("发货时间", auto_now_add=True)
     operator = models.CharField("发货员", max_length=50)
 
+    def clean(self):
+        super().clean()
+        # 数量为 None / 0 / 负——一律拒
+        if self.quantity_shipped is None or self.quantity_shipped <= 0:
+            raise ValidationError({'quantity_shipped': '发货数量必须大于 0'})
+        # 不能超过该明细当前可发数量（min(quantity, produced) - shipped）
+        sales_item = self.sales_item
+        if sales_item is not None:
+            available = sales_item.available_to_ship_quantity
+            if self.quantity_shipped > available:
+                raise ValidationError({
+                    'quantity_shipped': (
+                        f'超过可发数量：本明细当前最多可发 {available} 套'
+                        f'（订单 {sales_item.quantity}、已生产 {sales_item.produced_quantity}、'
+                        f'已发货 {sales_item.shipped_quantity}）'
+                    ),
+                })
+
     def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        if is_new:
+            self.clean()
         # 发货只同步事件，不再联动库存
         OrderEvent.objects.create(
             order=self.sales_item.order,
@@ -194,14 +224,45 @@ class PurchaseOrderEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 class ReceivingLog(models.Model):
-    """分批入库记录：核心自动化点"""
+    """分批入库记录：核心自动化点。
+
+    校验（2026-06-19 漏洞 2 加固，详见 §9.4 changelog）：
+      - quantity_received > 0
+      - quantity_received <= 该采购明细的"剩余可收"
+        （= purchase_item.quantity - sum(已有 receipts.quantity_received)）
+    上层 ReceivingLogSerializer 同口径再校一遍——API 路径出友好错误码，
+    model 层是 admin / raw ORM / 测试脚本的兜底防线。
+    Append-only：clean() 仅在新建时跑。
+    """
     purchase_item = models.ForeignKey(PurchaseOrderItem, related_name='receipts', on_delete=models.CASCADE)
     quantity_received = models.DecimalField("本次实收数量", max_digits=12, decimal_places=2)
     received_at = models.DateTimeField("收货时间", auto_now_add=True)
     remark = models.CharField("批次备注", max_length=200, blank=True)
     operator = models.CharField("仓管员", max_length=50)
 
+    def clean(self):
+        super().clean()
+        if self.quantity_received is None or self.quantity_received <= 0:
+            raise ValidationError({'quantity_received': '收货数量必须大于 0'})
+        purchase_item = self.purchase_item
+        if purchase_item is not None:
+            recorded = purchase_item.receipts.aggregate(
+                total=Sum('quantity_received')
+            )['total'] or Decimal('0')
+            # 新建路径 self.pk is None 时不需要减自身（self 还未落库）；
+            # 万一以后允许 update，下面这段会自动扣回自己之前的数。
+            if self.pk is not None:
+                recorded -= self.quantity_received
+            remaining = purchase_item.quantity - recorded
+            if self.quantity_received > remaining:
+                raise ValidationError({
+                    'quantity_received': f'超过待收数量，剩余 {remaining}',
+                })
+
     def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        if is_new:
+            self.clean()
         with transaction.atomic():
             super().save(*args, **kwargs)
 
@@ -313,8 +374,24 @@ class StockAdjustment(models.Model):
             return 'PRODUCE'
         return 'ADJUST'
 
+    def clean(self):
+        """业务校验（2026-06-19 漏洞 2 加固，详见 §9.4 changelog）。
+
+        quantity 是无符号数量（"调整 N 个"），出库方向由 adjustment_type +
+        _delta() 解析。所以即使是 MANUAL_OUT / PRODUCE_CONSUME，传进来的
+        quantity 也必须 > 0。
+
+        上层 StockAdjustmentSerializer 同口径再校一遍——API 出友好错误码，
+        model 层兜底 admin / raw ORM。
+        """
+        super().clean()
+        if self.quantity is None or self.quantity <= 0:
+            raise ValidationError({'quantity': '调整数量必须大于 0'})
+
     def save(self, *args, **kwargs):
         is_new = self.pk is None
+        if is_new:
+            self.clean()
         with transaction.atomic():
             super().save(*args, **kwargs)
             if is_new:
@@ -437,3 +514,44 @@ class ProductionRecord(models.Model):
 
     def __str__(self):
         return f"排产 #{self.id} sales_item={self.sales_item_id} 数量={self.quantity}"
+
+    def clean(self):
+        """业务校验（2026-06-19 漏洞 2 加固，详见 §9.4 changelog）。
+
+        三道闸门：
+          1. quantity > 0
+          2. sales_item 三件齐（外壳 + PCB 方案 + 线材）
+          3. 不过排产：已生产 + 本次 ≤ 订单总量
+
+        上层 ProductionRecordSerializer 同口径再校一遍——API 出友好错误码，
+        model 层兜底 admin / raw ORM / 数据脚本。
+        """
+        super().clean()
+        if self.quantity is None or self.quantity <= 0:
+            raise ValidationError({'quantity': '本次产量必须大于 0'})
+        sales_item = self.sales_item
+        if sales_item is None:
+            # FK 缺失会被 super().save() 自己挡（NOT NULL 约束），这里 early-out
+            return
+        missing = [
+            slot for slot in ('product', 'pcb_plan', 'cable')
+            if getattr(sales_item, slot, None) is None
+        ]
+        if missing:
+            raise ValidationError({
+                'sales_item': f'销售明细缺少: {", ".join(missing)}，无法排产',
+            })
+        already_produced = sales_item.produced_quantity
+        if already_produced + self.quantity > sales_item.quantity:
+            remaining = sales_item.quantity - already_produced
+            raise ValidationError({
+                'quantity': (
+                    f'超过订单待排产数量：订单总量 {sales_item.quantity}、'
+                    f'已生产 {already_produced}、本次最多可排 {max(0, remaining)} 套'
+                ),
+            })
+
+    def save(self, *args, **kwargs):
+        if self.pk is None:
+            self.clean()
+        super().save(*args, **kwargs)

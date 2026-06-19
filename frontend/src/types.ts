@@ -116,28 +116,8 @@ export interface InventoryProduct {
   categoryId?: number;
 }
 
-// 注意：OrderSummary / PurchaseOrderSummary 接口已删除——它们仅被死代码
-// （OrderTable.tsx / SummaryCards.tsx，已于 2026-05-11 删除）引用。
-// 现役订单类型应使用 hooks/useSalesOrders.ts 与 hooks/usePurchaseOrders.ts
+// 订单类型请用 hooks/useSalesOrders.ts 与 hooks/usePurchaseOrders.ts
 // 中的 SalesOrderResponse / PurchaseOrderResponse。
-//
-// FinanceTransactionListItem 与 ShippingLogSummary 仍保留，因为 FinanceList.tsx
-// 等死代码尚未清理；待下一轮统一删（见 docs/PRD.md §9.2）。
-export interface FinanceTransactionListItem {
-  id: number;
-  partner: string;
-  amount: number;
-  note: string;
-  createdAt: string;
-}
-
-export interface ShippingLogSummary {
-  id: number;
-  orderNo: string;
-  partner: string;
-  product: string;
-  quantity: number;
-  shippedQuantity: number;
-  shippedAt: string;
-  status: string;
-}
+// （历史 OrderSummary / PurchaseOrderSummary / FinanceTransactionListItem /
+// ShippingLogSummary 接口已随对应 FinanceList / OrderTable / SummaryCards
+// 死代码于 2026-06-18 一并清理。）
