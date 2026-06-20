@@ -48,6 +48,34 @@ class PcbPlanMaterialSerializer(serializers.ModelSerializer):
         return value
 
 
+class PcbPlanLightSerializer(serializers.ModelSerializer):
+    """PCB 方案的"轻量"序列化器——**不展开 materials**。
+
+    2026-06-19 性能加固：销售订单 list 接口每条 item 都嵌套 pcb_plan_detail
+    时，每个 PcbPlanSerializer 又展开 24-37 条 materials + 每条 material 又
+    嵌套 material_detail（Product 全字段）+ category_detail。200 张订单 ×
+    3 items × 30 materials ≈ 18000 个嵌套对象，序列化 + JSON 编码就是
+    10+ 秒（详见 docs/PRD.md §9.4 changelog）。
+
+    grep 确认 ``pcb_plan.materials`` 数组**只在 PcbPlanPanel 单独使用**——
+    销售/采购/排产/发货面板都不读它。所以这些 list 接口换用 LightSerializer
+    就够；想看 materials 的场景（PcbPlanPanel）走 ``/api/core/pcb-plans/``
+    自己 endpoint，仍用完整版。
+
+    与 ``PcbPlanSerializer`` 的字段差：
+      - 无 ``materials``（也就 ~5KB / 条的节省）
+      - 其他字段全保留——前端展示方案名/编号/是否启用都还要用
+    """
+
+    class Meta:
+        model = PcbPlan
+        fields = [
+            'id', 'name', 'code', 'description', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
 class PcbPlanSerializer(serializers.ModelSerializer):
     """PCB 方案——支持 nested materials 写入。
 

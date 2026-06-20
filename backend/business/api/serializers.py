@@ -4,7 +4,7 @@ from django.db import transaction
 from django.db.models import Sum
 from rest_framework import serializers
 
-from core.serializers import ProductSerializer, PcbPlanSerializer
+from core.serializers import ProductSerializer, PcbPlanSerializer, PcbPlanLightSerializer
 from business.models import (
     PurchaseOrder,
     PurchaseOrderItem,
@@ -303,6 +303,50 @@ class SalesOrderItemWriteSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class SalesOrderItemListSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
+    """销售明细的"轻量列表"版本（2026-06-19 性能加固）。
+
+    与 ``SalesOrderItemSerializer`` 的差异：
+      - ``pcb_plan_detail`` 用 ``PcbPlanLightSerializer``（**无 materials**）
+      - 其它字段都保留——前端列表卡 + 展开详情都还能用
+
+    生效路径：``SalesOrderViewSet.get_serializer_class`` 在 ``action == 'list'``
+    时返回 ``SalesOrderListSerializer``（用本类作为 items 子序列化器）。
+    详见 docs/PRD.md §9.4 changelog 与 PcbPlanLightSerializer 文档。
+
+    单条 retrieve / create / update 仍走完整版——展开详情 / 编辑时需要
+    完整的方案信息。
+    """
+    product_detail = ProductSerializer(source='product', read_only=True)
+    pcb_plan_detail = PcbPlanLightSerializer(source='pcb_plan', read_only=True)
+    cable_detail = ProductSerializer(source='cable', read_only=True)
+    shipped_quantity = serializers.SerializerMethodField()
+    produced_quantity = serializers.SerializerMethodField()
+    available_to_ship_quantity = serializers.SerializerMethodField()
+    monetary_fields = ['price']
+
+    class Meta:
+        model = SalesOrderItem
+        fields = [
+            'id',
+            'product', 'product_detail',
+            'pcb_plan', 'pcb_plan_detail',
+            'cable', 'cable_detail',
+            'custom_product_name', 'detail_description',
+            'price', 'quantity',
+            'shipped_quantity', 'produced_quantity', 'available_to_ship_quantity',
+        ]
+
+    def get_shipped_quantity(self, obj):
+        return obj.shipped_quantity
+
+    def get_produced_quantity(self, obj):
+        return obj.produced_quantity
+
+    def get_available_to_ship_quantity(self, obj):
+        return obj.available_to_ship_quantity
+
+
 class SalesOrderItemSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
     """销售明细读取序列化器。
 
@@ -356,6 +400,38 @@ class OrderEventSerializer(serializers.ModelSerializer):
         _resolve_operator(validated_data, self.context.get('request'))
         order = self.context['order']
         return order.events.create(**validated_data)
+
+
+class SalesOrderListSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
+    """销售订单的"轻量列表"版本（2026-06-19 性能加固）。
+
+    与 ``SalesOrderSerializer`` 的差异：
+      - ``items`` 子序列化器换成 ``SalesOrderItemListSerializer``（其内的
+        ``pcb_plan_detail`` 用 ``PcbPlanLightSerializer``，不展开 materials）
+      - **不返回 ``events``**——列表卡片不显示事件流，展开详情时再单独
+        拉 ``/api/business/sales-orders/{id}/events/``
+      - 没有 ``items_payload`` 这种 write-only 字段——list 只读不写
+
+    生效路径：``SalesOrderViewSet.get_serializer_class`` 在 ``action == 'list'``
+    时返回本类。retrieve / create / update 仍走完整 ``SalesOrderSerializer``。
+
+    实测线上（chunjiwang.com, 100 张 SO, 平均 3 items, 30 materials/plan）：
+      - 旧 list 接口：响应 3.2 MB / 200 张单耗时 12 秒
+      - 新 list 接口：响应预计 ~400 KB / 200 张单预计 1-2 秒
+    """
+    items = SalesOrderItemListSerializer(many=True, read_only=True)
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    monetary_fields = ['total_amount']
+
+    class Meta:
+        model = SalesOrder
+        fields = [
+            'id', 'order_no', 'partner', 'partner_name', 'status', 'total_amount',
+            'created_at', 'operator', 'items',
+            'expected_delivery_date',
+            'is_archived', 'archived_at', 'archived_by',
+        ]
+        read_only_fields = fields  # 全部只读——list 不接受写
 
 
 class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):

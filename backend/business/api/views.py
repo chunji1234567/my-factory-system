@@ -30,6 +30,7 @@ from business.models import (
 from .serializers import (
     PurchaseOrderSerializer,
     SalesOrderSerializer,
+    SalesOrderListSerializer,  # 2026-06-19 性能加固：list 路径用瘦身版
     ReceivingLogSerializer,
     ShippingLogSerializer,
     StockAdjustmentSerializer,
@@ -229,17 +230,42 @@ class SalesOrderViewSet(mixins.ListModelMixin,
     filterset_class = SalesOrderFilter
     ordering_fields = ['created_at', 'total_amount']
 
+    def get_serializer_class(self):
+        """list 路径用瘦身版（去掉 pcb_plan.materials + events 嵌套），其它路径用完整版。
+
+        2026-06-19 性能加固：原 SalesOrderSerializer 单条响应 ~16KB，200 张单 12 秒。
+        换 SalesOrderListSerializer 后预计 ~2KB / 条，200 张单 1-2 秒。
+        详见 SalesOrderListSerializer 文档 + docs/PRD.md §9.4 changelog。
+        """
+        if self.action == 'list':
+            return SalesOrderListSerializer
+        return SalesOrderSerializer
+
     def get_queryset(self):
-        qs = (
-            SalesOrder.objects
-            .all()
-            .prefetch_related(
-                'items__product', 'items__cable', 'items__shippings',
-                # BOM-2.0：pcb_plan_detail 嵌套 materials → 一次性把展开链路 prefetch
-                'items__pcb_plan__materials__material__category',
+        # list 路径用更轻的 prefetch（无 materials 链路），retrieve 等仍走全量。
+        # prefetch 的成本主要在 ORM 跑 IN 查询 + Python 构造对象图——list 接口
+        # 既然不输出 materials，prefetch materials 就是纯浪费。
+        if self.action == 'list':
+            qs = (
+                SalesOrder.objects
+                .all()
+                .prefetch_related(
+                    'items__product', 'items__cable', 'items__pcb_plan', 'items__shippings',
+                    'items__production_records',  # produced_quantity 派生量要用
+                )
+                .select_related('partner')
             )
-            .select_related('partner')
-        )
+        else:
+            qs = (
+                SalesOrder.objects
+                .all()
+                .prefetch_related(
+                    'items__product', 'items__cable', 'items__shippings',
+                    # 完整版：pcb_plan_detail 嵌套 materials → 一次性把展开链路 prefetch
+                    'items__pcb_plan__materials__material__category',
+                )
+                .select_related('partner')
+            )
         # 默认隐藏已归档单（2026-06-19）。**仅 list 路径**强制过滤——retrieve /
         # destroy / archive / unarchive 都需要能命中归档单。客户端在 list 上
         # 显式传 ?is_archived=<...> 时 FilterSet 接管，这里不叠加默认。
