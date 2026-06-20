@@ -231,7 +231,8 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `${safeName}_${rangeLabel}_台账.csv`;
+      // 2026-06-19：从 CSV 切到 xlsx——支持单元格合并、列宽自适应、数字格式
+      link.download = `${safeName}_${rangeLabel}_台账.xlsx`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

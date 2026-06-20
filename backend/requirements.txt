@@ -13,3 +13,6 @@ dj-database-url==2.2.0
 # （cairo/pango），Windows/Linux/macOS 都能 pip 装上。
 # 中文用 STSong-Light CID 字体，不需要额外打包 TTF。
 reportlab==4.2.5
+# 财务台账 Excel 导出（详见 business/api/views.py FinancePartnerLedgerExportView）。
+# 2026-06-19 起从 CSV 切换到 xlsx——需要合并单元格、列宽自适应、单元格样式。 
+openpyxl==3.1.5

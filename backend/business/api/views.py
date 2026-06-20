@@ -1,5 +1,6 @@
 from decimal import Decimal
 import csv
+import io  # 2026-06-19：财务台账 xlsx 导出用 BytesIO
 
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Sum, Count, Max, OuterRef, Subquery, DecimalField
@@ -894,7 +895,137 @@ class FinancePartnerLedgerExportView(APIView):
             else:
                 entries = ledger_qs
 
-        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        # 2026-06-19 CSV → XLSX 切换（详见 docs/PRD.md §9.4）。
+        # 原因：①第一行公司名需要合并所有列居中；②列宽自适应；③数字格式化。
+        # openpyxl 是纯 Python 依赖，与 reportlab 同口径。
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = '台账'
+
+        headers = ['日期', '备注', '产品名', '数量', '单价', '小计']
+        n_cols = len(headers)
+
+        # 第 1 行：公司名跨所有列 + 居中 + 加粗 + 浅灰底
+        ws.cell(row=1, column=1, value=partner.name)
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+        title_cell = ws.cell(row=1, column=1)
+        title_cell.font = Font(name='Microsoft YaHei', size=14, bold=True)
+        title_cell.alignment = Alignment(horizontal='center', vertical='center')
+        title_cell.fill = PatternFill('solid', fgColor='F1F5F9')
+        ws.row_dimensions[1].height = 28
+
+        # 第 2 行：表头
+        header_font = Font(name='Microsoft YaHei', bold=True, color='FFFFFF')
+        header_fill = PatternFill('solid', fgColor='475569')
+        header_align = Alignment(horizontal='center', vertical='center')
+        for col_idx, label in enumerate(headers, start=1):
+            cell = ws.cell(row=2, column=col_idx, value=label)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+        ws.row_dimensions[2].height = 22
+
+        # 数据行
+        body_font = Font(name='Microsoft YaHei', size=11)
+        center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        left_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        right_align = Alignment(horizontal='right', vertical='center')
+        money_fmt = '#,##0.00'
+        qty_fmt = '0.##'
+
+        row = 3
+        for entry in entries:
+            if summary_mode:
+                created_at = entry['created_at'].strftime('%Y-%m-%d')
+                note = entry.get('raw_note', entry.get('note', ''))
+                amount = Decimal(str(entry['amount']))
+                order_for_items = None
+            else:
+                created_at = entry.created_at.strftime('%Y-%m-%d')
+                note = _compose_entry_note(entry)
+                amount = Decimal(str(entry.amount))
+                order_for_items = entry.sales_order or entry.purchase_order
+
+            items_list = list(_iter_order_items(order_for_items)) if order_for_items else []
+
+            if not items_list:
+                # 非订单类（收款/付款）：1 行；小计列 = 台账净额
+                ws.cell(row=row, column=1, value=created_at).alignment = center_align
+                ws.cell(row=row, column=2, value=note).alignment = left_align
+                amt_cell = ws.cell(row=row, column=6, value=float(amount))
+                amt_cell.number_format = money_fmt
+                amt_cell.alignment = right_align
+                for c in range(1, n_cols + 1):
+                    ws.cell(row=row, column=c).font = body_font
+                row += 1
+                continue
+
+            # 订单类：N 行；首行 = 日期 + 备注 + 第一条 item；后续行只填 item
+            for idx, it in enumerate(items_list):
+                if idx == 0:
+                    ws.cell(row=row, column=1, value=created_at).alignment = center_align
+                    ws.cell(row=row, column=2, value=note).alignment = left_align
+                ws.cell(row=row, column=3, value=it['name']).alignment = left_align
+                qty_cell = ws.cell(row=row, column=4, value=float(it['quantity']))
+                qty_cell.number_format = qty_fmt
+                qty_cell.alignment = right_align
+                price_cell = ws.cell(row=row, column=5, value=float(it['price']))
+                price_cell.number_format = money_fmt
+                price_cell.alignment = right_align
+                sub_cell = ws.cell(row=row, column=6, value=float(it['subtotal']))
+                sub_cell.number_format = money_fmt
+                sub_cell.alignment = right_align
+                for c in range(1, n_cols + 1):
+                    ws.cell(row=row, column=c).font = body_font
+                row += 1
+
+        # 自适应列宽——扫单元格内容估算（中文按 1.7 字符宽）
+        for col_idx in range(1, n_cols + 1):
+            col_letter = get_column_letter(col_idx)
+            max_len = 0
+            for cell in ws[col_letter]:
+                if cell.value is None:
+                    continue
+                s = str(cell.value)
+                width = sum(1.7 if ord(ch) > 127 else 1.0 for ch in s)
+                if width > max_len:
+                    max_len = width
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 60)
+
+        ws.freeze_panes = 'A3'
+
+        # 输出 + 文件名（带日期区间）
+        if ledger_from and ledger_to:
+            range_str = f'{ledger_from.strftime("%Y%m%d")}_{ledger_to.strftime("%Y%m%d")}'
+        elif export_year:
+            range_str = f'{export_year}'
+        else:
+            range_str = 'all'
+        partner_name_safe = ''.join(
+            ch for ch in (partner.name or '') if ch not in '/\\:*?"<>|'
+        ).strip() or f'合作方{partner.id}'
+        filename_ascii = f'partner_{partner.id}_ledger_{range_str}.xlsx'
+        filename_utf8 = f'{partner_name_safe}_{range_str}_台账.xlsx'
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        response = HttpResponse(
+            buffer.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        from urllib.parse import quote
+        response['Content-Disposition'] = (
+            f'attachment; filename="{filename_ascii}"; '
+            f"filename*=UTF-8''{quote(filename_utf8)}"
+        )
+        return response
+        # 2026-06-19：旧 CSV 实现已废弃，替换为上方 xlsx。  # noqa
+        return response
+        _LEGACY_BLOCK_BEGIN = '''
         # 2026-06-19\uff1a\u6587\u4ef6\u540d\u5e26\u65e5\u671f\u533a\u95f4\u2014\u2014\u652f\u6301\u6708\u4efd/\u5e74/\u4efb\u610f\u533a\u95f4\u7edf\u4e00\u683c\u5f0f
         if ledger_from and ledger_to:
             range_str = f'{ledger_from.strftime("%Y%m%d")}_{ledger_to.strftime("%Y%m%d")}'
@@ -982,6 +1113,7 @@ class FinancePartnerLedgerExportView(APIView):
                 ])
 
         return response
+        '''  # 关闭 _LEGACY_BLOCK_BEGIN
 
     @staticmethod
     def _parse_year(value):
