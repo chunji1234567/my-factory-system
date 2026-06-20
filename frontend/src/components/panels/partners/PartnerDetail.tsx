@@ -179,39 +179,59 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
     };
   }, [detailData, ordersPage]);
 
-  // --- 台账年份导出 ---
-  const currentYear = new Date().getFullYear();
-  const [exportYear, setExportYear] = useState<string>(String(currentYear));
+  // --- 台账月份区间导出（2026-06-19 改造，详见 docs/PRD.md §9.4）---
+  // 之前是"导出 YYYY 年"下拉；改成"起始月 → 结束月"两个 month input。
+  // 默认起=结=本月。<input type="month"> 返回 "YYYY-MM"，要拼成 "YYYY-MM-01"
+  // 和该月末日 才能传给后端 ledgerFrom/ledgerTo。
+  const todayMonth = new Date().toISOString().slice(0, 7);  // "YYYY-MM"
+  const [exportFromMonth, setExportFromMonth] = useState<string>(todayMonth);
+  const [exportToMonth, setExportToMonth] = useState<string>(todayMonth);
   const [exporting, setExporting] = useState(false);
-  const yearOptions = useMemo(() => {
-    const ys: { value: string; label: string }[] = [];
-    for (let y = currentYear; y >= currentYear - 5; y--) {
-      ys.push({ value: String(y), label: `${y} 年` });
-    }
-    return ys;
-  }, [currentYear]);
+
+  /** "YYYY-MM" → "YYYY-MM-01"（起始月第一天） */
+  const monthStart = (m: string) => `${m}-01`;
+
+  /** "YYYY-MM" → "YYYY-MM-DD"（该月最后一天，处理 28/29/30/31）*/
+  const monthEnd = (m: string) => {
+    const [year, mon] = m.split('-').map(Number);
+    // mon 是 1-12；Date(year, mon, 0) = 该月最后一天
+    const d = new Date(year, mon, 0);
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${m}-${dd}`;
+  };
 
   const handleExport = async () => {
+    // 参数校验：起 ≤ 结
+    if (exportFromMonth > exportToMonth) {
+      toast.error('起始月份不能晚于结束月份');
+      return;
+    }
     try {
       setExporting(true);
-      const y = Number(exportYear);
+      const fromDate = monthStart(exportFromMonth);
+      const toDate = monthEnd(exportToMonth);
       const blob = await api.exportFinancePartnerLedger(
         partner.id,
         resolveFinanceType(partner.partner_type),
         {
-          ledgerFrom: `${y}-01-01`,
-          ledgerTo: `${y}-12-31`,
-          summary: true,
+          ledgerFrom: fromDate,
+          ledgerTo: toDate,
+          summary: false,  // 导出详细模式（含订单明细 + 财务流水）
         },
       );
+      // 文件名优先用后端 Content-Disposition 的中文名（已带区间）。
+      // 浏览器对 blob 自动下载时不能直接读 header，所以前端这边也拼一个 fallback。
       const safeName = (detailData?.partner_name || partner.name).replace(
         /[^\w一-龥-]+/g,
         '_',
       );
+      const rangeLabel = exportFromMonth === exportToMonth
+        ? exportFromMonth
+        : `${exportFromMonth}_${exportToMonth}`;
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `${safeName}_${y}_ledger.csv`;
+      link.download = `${safeName}_${rangeLabel}_台账.csv`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -431,19 +451,27 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
           <Section
             title="台账概览"
             action={
-              <div className="flex items-center gap-2">
-                <select
-                  value={exportYear}
-                  onChange={(e) => setExportYear(e.target.value)}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 2026-06-19：月份区间选择——type="month" 浏览器原生 month picker */}
+                <input
+                  type="month"
+                  value={exportFromMonth}
+                  onChange={(e) => setExportFromMonth(e.target.value)}
+                  max={exportToMonth}
                   className="rounded-input border border-line bg-surface px-3 py-1.5 text-caption outline-none
                              focus:border-line-focus focus:ring-2 focus:ring-primary/5"
-                >
-                  {yearOptions.map((y) => (
-                    <option key={y.value} value={y.value}>
-                      {y.label}
-                    </option>
-                  ))}
-                </select>
+                  title="起始月"
+                />
+                <span className="text-caption text-ink-faint">→</span>
+                <input
+                  type="month"
+                  value={exportToMonth}
+                  onChange={(e) => setExportToMonth(e.target.value)}
+                  min={exportFromMonth}
+                  className="rounded-input border border-line bg-surface px-3 py-1.5 text-caption outline-none
+                             focus:border-line-focus focus:ring-2 focus:ring-primary/5"
+                  title="结束月"
+                />
                 <button
                   onClick={handleExport}
                   disabled={exporting}
@@ -451,7 +479,7 @@ export function PartnerDetail({ partner, onBack, onPartnerRefresh }: Props) {
                              hover:bg-primary-hover active:scale-95 transition-all
                              disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
-                  {exporting ? '导出中...' : `导出 ${exportYear} 年台账`}
+                  {exporting ? '导出中...' : '导出台账'}
                 </button>
               </div>
             }

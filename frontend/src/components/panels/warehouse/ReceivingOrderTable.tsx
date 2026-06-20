@@ -36,6 +36,8 @@ interface Order {
   partner_name?: string;
   partner?: number;
   order_no: string;
+  /** 2026-06-19：供应商订单号，可空。收货中心优先显示这个。 */
+  partner_order_no?: string;
   status: string;
   items: PurchaseItem[];
   expected_arrival_date?: string | null;
@@ -66,7 +68,10 @@ export function ReceivingOrderTable({ orders, statusOf, onReceiveOne, onReceiveA
                 <p className="text-body font-bold text-ink truncate">
                   {order.partner_name || `供应商#${order.partner}`}
                 </p>
-                <p className="text-micro text-ink-faint font-mono mt-0.5">{order.order_no}</p>
+                {/* 2026-06-19：供应商订单号优先，没有则回退到内部单号 */}
+                <p className="text-micro text-ink-faint font-mono mt-0.5">
+                  {order.partner_order_no || order.order_no}
+                </p>
               </div>
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
                 <DueDatePill date={order.expected_arrival_date} outline />

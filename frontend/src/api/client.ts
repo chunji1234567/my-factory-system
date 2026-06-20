@@ -276,6 +276,60 @@ export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promi
   return response.json() as Promise<T>;
 }
 
+/** 2026-06-19：通用单张订单 PDF 下载 helper。
+ *
+ *  解析后端的 Content-Disposition 头拿到中文文件名（RFC 5987 编码格式
+ *  `filename*=UTF-8''<percent-encoded>`）。如果后端没给文件名，回退到
+ *  ``{defaultPrefix}_<orderId>.pdf``。
+ */
+async function _downloadOrderPdf(
+  url: string,
+  defaultPrefix: string,
+): Promise<{ blob: Blob; filename: string }> {
+  if (!authToken) {
+    throw new Error('Missing auth token');
+  }
+  const response = await fetch(`${API_BASE_URL}${url}`, {
+    headers: {
+      Accept: 'application/pdf',
+      Authorization: `Bearer ${authToken}`,
+    },
+  });
+  if (!response.ok) {
+    let message = `下载${defaultPrefix} PDF 失败`;
+    try {
+      const text = await response.text();
+      if (text) {
+        try {
+          const data = JSON.parse(text);
+          message = data.detail || text;
+        } catch {
+          message = text;
+        }
+      }
+    } catch {
+      // noop
+    }
+    throw new Error(message);
+  }
+  const disp = response.headers.get('Content-Disposition') || '';
+  // 解析 filename*=UTF-8''xxxx（优先）或 filename="xxx"
+  const utf8Match = disp.match(/filename\*=UTF-8''([^;]+)/i);
+  const plainMatch = disp.match(/filename="?([^";]+)"?/i);
+  let filename = `${defaultPrefix}.pdf`;
+  if (utf8Match) {
+    try {
+      filename = decodeURIComponent(utf8Match[1]);
+    } catch {
+      filename = utf8Match[1];
+    }
+  } else if (plainMatch) {
+    filename = plainMatch[1];
+  }
+  const blob = await response.blob();
+  return { blob, filename };
+}
+
 export const api = {
   login(credentials: { username: string; password: string }) {
     return apiFetch<{ access: string; refresh: string }>(`/api/token/`, {
@@ -393,6 +447,8 @@ export const api = {
     items_payload: SalesOrderItemPayload[];
     /** ISO 日期串 "YYYY-MM-DD"，可空。详见 backend migration 0019。 */
     expected_delivery_date?: string | null;
+    /** 2026-06-19：客户订单号，可空。 */
+    partner_order_no?: string;
   }) {
     return apiFetch(`/api/business/sales-orders/`, {
       method: 'POST',
@@ -411,6 +467,8 @@ export const api = {
       operator?: string;
       items_payload: SalesOrderItemPayload[];
       expected_delivery_date: string | null;
+      /** 2026-06-19：客户订单号，可空。 */
+      partner_order_no: string;
     }>,
   ) {
     return apiFetch(`/api/business/sales-orders/${id}/`, {
@@ -474,6 +532,8 @@ export const api = {
     items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>;
     /** ISO 日期串 "YYYY-MM-DD"，可空。详见 backend migration 0019。 */
     expected_arrival_date?: string | null;
+    /** 2026-06-19：供应商订单号，可空。 */
+    partner_order_no?: string;
   }) {
     return apiFetch(`/api/business/purchase-orders/`, {
       method: 'POST',
@@ -488,6 +548,8 @@ export const api = {
       operator?: string;
       items_payload: Array<{ id?: number; product: number; price: number; quantity: number }>;
       expected_arrival_date: string | null;
+      /** 2026-06-19：供应商订单号，可空。 */
+      partner_order_no: string;
     }>,
   ) {
     return apiFetch(`/api/business/purchase-orders/${id}/`, {
@@ -602,6 +664,22 @@ export const api = {
       throw new Error(message);
     }
     return response.blob();
+  },
+  /**
+   * 2026-06-19：下载单张销售订单确认书 PDF。
+   *
+   * 业务约定（详见 docs/PRD.md §9.4）：
+   *   - PDF 内的订单号显示规则：仅显示 partner_order_no（客户自家单号），
+   *     空则不显示订单号。我们的内部 order_no 在 PDF 里完全不出现。
+   *
+   * 返回 Blob，调用方负责触发浏览器下载。
+   */
+  async downloadSalesOrderPdf(orderId: number): Promise<{ blob: Blob; filename: string }> {
+    return _downloadOrderPdf(`/api/business/sales-orders/${orderId}/pdf/`, '销售订单');
+  },
+  /** 2026-06-19：下载单张采购订单确认书 PDF（同上口径）。 */
+  async downloadPurchaseOrderPdf(orderId: number): Promise<{ blob: Blob; filename: string }> {
+    return _downloadOrderPdf(`/api/business/purchase-orders/${orderId}/pdf/`, '采购订单');
   },
   createReceivingLog(payload: { purchase_item: number; quantity_received: number; remark?: string }) {
     return apiFetch(`/api/business/receiving-logs/`, {

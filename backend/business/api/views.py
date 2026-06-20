@@ -213,6 +213,52 @@ class PurchaseOrderViewSet(mixins.ListModelMixin,
         order.save(update_fields=['is_archived', 'archived_at', 'archived_by'])
         return Response(PurchaseOrderSerializer(order, context={'request': request}).data)
 
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path='pdf',
+        renderer_classes=[PDFRenderer],
+    )
+    def pdf(self, request, pk=None):
+        """单张采购订单确认书 PDF（A4 单页，给供应商签字）。
+
+        业务约定（2026-06-19，详见 docs/PRD.md §9.4）：
+          - 订单号显示规则：仅显示 partner_order_no；空则不显示订单号。
+            我们的内部 order_no 在 PDF 里完全不出现。
+        """
+        from datetime import date as _date
+        from django.http import JsonResponse, HttpResponse
+        from .order_confirmation_pdf import generate_purchase_order_confirmation_pdf
+
+        order = self.get_object()
+        try:
+            pdf_bytes = generate_purchase_order_confirmation_pdf(order)
+        except Exception as exc:  # pragma: no cover
+            return JsonResponse({'detail': f'PDF 生成失败：{exc}'}, status=500)
+
+        # 2026-06-19：文件名格式 = <供应商名>_采购订单_<供应商单号 或 日期+id>.pdf
+        # 供应商单号空时回退到 "日期_id" 段——避免文件名冲突。
+        # 路径分隔符和 Windows 非法字符全部剥掉（中文/空格保留）。
+        def _safe(s: str) -> str:
+            return ''.join(ch for ch in s if ch not in '/\\:*?"<>|').strip()
+
+        partner_name = _safe(getattr(order.partner, 'name', '') or '供应商')
+        po_no = _safe(order.partner_order_no or '')
+        if po_no:
+            filename = f'{partner_name}_采购订单_{po_no}.pdf'
+        else:
+            filename = (
+                f'{partner_name}_采购订单_'
+                f'{_date.today().strftime("%Y%m%d")}_{order.id}.pdf'
+            )
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        # RFC 5987 编码处理中文文件名
+        from urllib.parse import quote
+        response['Content-Disposition'] = (
+            f"attachment; filename=order.pdf; filename*=UTF-8''{quote(filename)}"
+        )
+        return response
+
 
 class SalesOrderViewSet(mixins.ListModelMixin,
                         mixins.RetrieveModelMixin,
@@ -374,6 +420,50 @@ class SalesOrderViewSet(mixins.ListModelMixin,
         order.archived_by = ''
         order.save(update_fields=['is_archived', 'archived_at', 'archived_by'])
         return Response(SalesOrderSerializer(order, context={'request': request}).data)
+
+    @action(
+        detail=True,
+        methods=['get'],
+        url_path='pdf',
+        renderer_classes=[PDFRenderer],
+    )
+    def pdf(self, request, pk=None):
+        """单张销售订单确认书 PDF（A4 单页，给客户签字）。
+
+        业务约定（2026-06-19，详见 docs/PRD.md §9.4）：
+          - 订单号显示规则：仅显示 partner_order_no；空则不显示订单号。
+            我们的内部 order_no 在 PDF 里完全不出现。
+        """
+        from datetime import date as _date
+        from django.http import JsonResponse, HttpResponse
+        from .order_confirmation_pdf import generate_sales_order_confirmation_pdf
+
+        order = self.get_object()
+        try:
+            pdf_bytes = generate_sales_order_confirmation_pdf(order)
+        except Exception as exc:  # pragma: no cover
+            return JsonResponse({'detail': f'PDF 生成失败：{exc}'}, status=500)
+
+        # 2026-06-19：文件名格式 = <客户名>_销售订单_<客户单号 或 日期+id>.pdf
+        # 同 PurchaseOrderViewSet.pdf 口径。
+        def _safe(s: str) -> str:
+            return ''.join(ch for ch in s if ch not in '/\\:*?"<>|').strip()
+
+        partner_name = _safe(getattr(order.partner, 'name', '') or '客户')
+        po_no = _safe(order.partner_order_no or '')
+        if po_no:
+            filename = f'{partner_name}_销售订单_{po_no}.pdf'
+        else:
+            filename = (
+                f'{partner_name}_销售订单_'
+                f'{_date.today().strftime("%Y%m%d")}_{order.id}.pdf'
+            )
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        from urllib.parse import quote
+        response['Content-Disposition'] = (
+            f"attachment; filename=order.pdf; filename*=UTF-8''{quote(filename)}"
+        )
+        return response
 
 
 class CustomerPreferredProductViewSet(mixins.ListModelMixin,
@@ -672,12 +762,41 @@ def _format_ledger_source(entry):
 
 
 def _format_order_items(order):
+    """**已弃用**——保留以兼容旧调用点。新代码请用 _iter_order_items。
+
+    2026-06-19 改造（详见 docs/PRD.md §9.4 changelog）：原实现把订单所有
+    明细用 "; " 拼成一格，N 条明细时单元格可达数千字符，在 Excel 里像一面
+    黑墙。改造后导出每条 item 各占一行（详见 FinancePartnerLedgerExportView.get）。
+
+    本函数仅供 summary 模式或者外部偶尔需要"一句话概括订单内容"时使用——
+    那时已经牺牲了完整性、可读性优先。
+    """
     if not order:
         return ''
-    details = []
+    items_iter = list(_iter_order_items(order))
+    if not items_iter:
+        return ''
+    # 摘要展示：最多 2 条明细 + 省略号
+    summary = '; '.join(
+        f"{it['name']} x{_fmt_qty(it['quantity'])}"
+        for it in items_iter[:2]
+    )
+    if len(items_iter) > 2:
+        summary += f' ... 共 {len(items_iter)} 条'
+    return summary
+
+
+def _iter_order_items(order):
+    """惰性 yield 订单的 (name, quantity, price, subtotal, description) 字典。
+
+    2026-06-19 新增——给"每条明细一行"的台账导出用。复用 _format_order_items
+    原本的取字段逻辑。
+    """
+    if not order:
+        return
     items = getattr(order, 'items', None)
     if items is None:
-        return ''
+        return
     iterable = items.all() if hasattr(items, 'all') else items
     for item in iterable:
         name = getattr(item, 'custom_product_name', None)
@@ -689,20 +808,38 @@ def _format_order_items(order):
             name = '未命名'
         quantity = getattr(item, 'quantity', 0) or 0
         price = getattr(item, 'price', Decimal('0')) or Decimal('0')
-        details.append(f"{name}: {quantity} x ¥{price:.2f}")
-    return '; '.join(details)
+        subtotal = (Decimal(str(quantity)) * Decimal(str(price))) if price else Decimal('0')
+        description = getattr(item, 'detail_description', '') or ''
+        yield {
+            'name': name,
+            'quantity': quantity,
+            'price': price,
+            'subtotal': subtotal,
+            'description': description.strip(),
+        }
+
+
+def _fmt_qty(value):
+    """整数显示整数，避免 "10.00"。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if v == int(v):
+        return str(int(v))
+    return f'{v:g}'
+
+
+# 2026-06-19：曾短暂存在 _format_items_multiline 用于"单元格内 \n 多行"
+# 的方案 C，已切换到方案 A（行展开），不再需要。函数已删除。
 
 
 def _compose_entry_note(entry):
-    note = entry.note or ''
-    detail_str = ''
-    if entry.sales_order_id:
-        detail_str = _format_order_items(entry.sales_order)
-    elif entry.purchase_order_id:
-        detail_str = _format_order_items(entry.purchase_order)
-    if detail_str:
-        note = f"{note} | 明细: {detail_str}" if note else f"明细: {detail_str}"
-    return note
+    """台账行 note 列。
+    2026-06-19 改造：不再嵌入完整 items 串。来源列已经有订单号，需要看明细
+    时去看导出末尾的"订单明细"段（每条 item 一行）。
+    """
+    return entry.note or ''
 
 
 def _ledger_group_key(entry):
@@ -758,32 +895,70 @@ class FinancePartnerLedgerExportView(APIView):
                 entries = ledger_qs
 
         response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
-        filename = f'partner_{partner.id}_ledger.csv'
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        # 2026-06-19\uff1a\u6587\u4ef6\u540d\u5e26\u65e5\u671f\u533a\u95f4\u2014\u2014\u652f\u6301\u6708\u4efd/\u5e74/\u4efb\u610f\u533a\u95f4\u7edf\u4e00\u683c\u5f0f
+        if ledger_from and ledger_to:
+            range_str = f'{ledger_from.strftime("%Y%m%d")}_{ledger_to.strftime("%Y%m%d")}'
+        elif export_year:
+            range_str = f'{export_year}'
+        else:
+            range_str = 'all'
+        # ASCII \u5b89\u5168\u6587\u4ef6\u540d\uff08partner.id + \u533a\u95f4\uff09+ UTF-8 \u4e2d\u6587\u7248\u7528 RFC 5987 \u7f16\u7801
+        filename_ascii = f'partner_{partner.id}_ledger_{range_str}.csv'
+        partner_name_safe = ''.join(
+            ch for ch in (partner.name or '') if ch not in '/\\:*?"<>|'
+        ).strip() or f'\u5408\u4f5c\u65b9{partner.id}'
+        filename_utf8 = f'{partner_name_safe}_{range_str}_\u53f0\u8d26.csv'
+        from urllib.parse import quote
+        response['Content-Disposition'] = (
+            f'attachment; filename="{filename_ascii}"; '
+            f"filename*=UTF-8''{quote(filename_utf8)}"
+        )
         response.write('\ufeff')
         writer = csv.writer(response)
 
         writer.writerow([partner.name])
-        writer.writerow(['日期', '类型', '借方', '贷方', '净额', '备注', '来源'])
+        # 2026-06-19 改造（选项 A，详见 docs/PRD.md §9.4）：
+        # 一个订单展开成 N 行——首行 = 台账数据 + 第一条 item；后续行只填
+        # item 列，左边台账列留空。视觉上同一订单的 items 紧跟在一起，
+        # 又不会把所有明细挤到一格里。非订单类条目（收款/付款）只 1 行。
+        # 来源列删掉——和备注列内容几乎完全一样（都含订单号）。
+        writer.writerow(['日期', '类型', '借方', '贷方', '净额', '备注', '产品名', '数量', '单价', '小计'])
 
         for entry in entries:
             if summary_mode:
                 entry_type_label = entry['entry_type_label']
                 created_at = entry['created_at'].strftime('%Y-%m-%d')
-                note = entry['note']
-                source = entry['source']
+                note = entry.get('raw_note', entry.get('note', ''))
                 debit = entry['debit_amount']
                 credit = entry['credit_amount']
                 amount = entry['amount']
+                order_for_items = None  # summary 模式不展开明细
             else:
                 entry_type_label = LEDGER_ENTRY_TYPE_LABELS.get(entry.entry_type, entry.entry_type)
                 created_at = entry.created_at.strftime('%Y-%m-%d')
-                source = _format_ledger_source(entry)
                 note = _compose_entry_note(entry)
                 debit = entry.debit_amount
                 credit = entry.credit_amount
                 amount = entry.amount
+                order_for_items = entry.sales_order or entry.purchase_order
 
+            items_list = list(_iter_order_items(order_for_items)) if order_for_items else []
+
+            if not items_list:
+                # 非订单类（收款/付款）或没明细的订单——1 行搞定，item 列全空
+                writer.writerow([
+                    created_at,
+                    entry_type_label,
+                    f"{debit:.2f}",
+                    f"{credit:.2f}",
+                    f"{amount:.2f}",
+                    note,
+                    '', '', '', '',
+                ])
+                continue
+
+            # 第一行：台账数据 + 第一条 item
+            first = items_list[0]
             writer.writerow([
                 created_at,
                 entry_type_label,
@@ -791,44 +966,19 @@ class FinancePartnerLedgerExportView(APIView):
                 f"{credit:.2f}",
                 f"{amount:.2f}",
                 note,
-                source,
+                first['name'],
+                _fmt_qty(first['quantity']),
+                f"{first['price']:.2f}",
+                f"{first['subtotal']:.2f}",
             ])
-
-        if not summary_mode:
-            writer.writerow([])
-
-            orders = order_model.objects.filter(partner=partner)
-            if export_year:
-                orders = orders.filter(created_at__year=export_year)
-            orders = orders.prefetch_related('items__product')
-
-            writer.writerow(['订单明细'])
-            writer.writerow(['订单号', '状态', '总额', '创建时间', '产品明细'])
-            for order in orders.order_by('-created_at'):
-                total_amount = order.total_amount or Decimal('0')
+            # 后续行：台账列留空，只填 item
+            for it in items_list[1:]:
                 writer.writerow([
-                    order.order_no,
-                    order.status,
-                    f"{total_amount:.2f}",
-                    order.created_at.strftime('%Y-%m-%d'),
-                    _format_order_items(order),
-                ])
-
-            writer.writerow([])
-
-            transactions = FinancialTransaction.objects.filter(partner=partner)
-            if export_year:
-                transactions = transactions.filter(created_at__year=export_year)
-
-            writer.writerow(['财务流水'])
-            writer.writerow(['金额', '类型', '备注', '时间'])
-            for txn in transactions.order_by('-created_at'):
-                amount = txn.amount or Decimal('0')
-                writer.writerow([
-                    f"{amount:.2f}",
-                    txn.get_transaction_type_display(),
-                    txn.note or '',
-                    txn.created_at.strftime('%Y-%m-%d'),
+                    '', '', '', '', '', '',
+                    it['name'],
+                    _fmt_qty(it['quantity']),
+                    f"{it['price']:.2f}",
+                    f"{it['subtotal']:.2f}",
                 ])
 
         return response

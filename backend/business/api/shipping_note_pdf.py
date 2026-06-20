@@ -287,7 +287,6 @@ def _build_partner_note(*, company_name, partner_label, rows, today_str, frame_w
     sign_row = Table(
         [[
             Paragraph('<b>客户签收：</b>__________________', _META_STYLE),
-            Paragraph('<b>司机：</b>__________________', _META_STYLE),
             Paragraph('<b>签收日期：</b>____________', _META_STYLE),
         ]],
         colWidths=[frame_width * 0.40, frame_width * 0.30, frame_width * 0.30],
@@ -330,7 +329,9 @@ def _build_items_table(rows, frame_width):
     for log in rows:
         item = getattr(log, 'sales_item', None)
         order = getattr(item, 'order', None) if item is not None else None
-        order_no = getattr(order, 'order_no', '') or ''
+        # 2026-06-19：导出时只显示客户单号；客户没给就留空（业务约定，详见 §9.4）
+        partner_order_no = (getattr(order, 'partner_order_no', '') or '').strip()
+        order_no = partner_order_no  # 不再 fallback 到 order.order_no
         model_name = getattr(item, 'custom_product_name', '') or ''
         detail = (getattr(item, 'detail_description', '') or '').strip()
         qty = log.quantity_shipped

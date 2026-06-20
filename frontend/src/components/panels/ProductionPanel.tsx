@@ -79,9 +79,12 @@ export default function ProductionPanel() {
       for (const item of order.items) {
         const produced = Number(item.produced_quantity ?? 0);
         const quantity = Number(item.quantity ?? 0);
+        // 2026-06-19：排产中心优先显示客户订单号，没有则回退到内部单号。
+        // 详见 docs/PRD.md §9.4 partner_order_no 业务约定。
+        const displayOrderNo = (order as any).partner_order_no || order.order_no;
         out.push({
           order_id: order.id,
-          order_no: order.order_no,
+          order_no: displayOrderNo,
           partner_name: order.partner_name ?? '—',
           item_id: item.id,
           custom_product_name: item.custom_product_name,

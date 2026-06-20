@@ -15,6 +15,14 @@ class SalesOrder(models.Model):
         ('COMPLETED', '已完成'),
     )
     order_no = models.CharField("销售单号", max_length=50, unique=True)
+    # 2026-06-19：客户自己 ERP 系统里的订单号，可空。
+    # 业务约定：有客户单号的，**优先用客户单号**对外沟通（PDF / 收据 / 邮件）；
+    # 排产 / 收货 / 发货面板也优先显示客户单号。客户单号为空时回退到 order_no。
+    # 详见 docs/PRD.md §9.4 changelog。
+    partner_order_no = models.CharField(
+        "客户订单号", max_length=100, blank=True, default='',
+        help_text="客户自家系统里的单号，可空；导出 PDF 时只显示这个字段",
+    )
     partner = models.ForeignKey(
         'core.Partner',
         on_delete=models.CASCADE,
@@ -191,9 +199,15 @@ class PurchaseOrder(models.Model):
         ('RECEIVED', '全部入库'),
     )
     order_no = models.CharField("采购单号", max_length=50, unique=True)
+    # 2026-06-19：供应商自己系统里的销售单号（对供应商而言我们是客户），可空。
+    # 业务约定同 SalesOrder.partner_order_no：有就优先用，无则回退 order_no。
+    partner_order_no = models.CharField(
+        "供应商订单号", max_length=100, blank=True, default='',
+        help_text="供应商系统里的单号，可空；导出 PDF 时只显示这个字段",
+    )
     partner = models.ForeignKey(
-        Partner, 
-        on_delete=models.CASCADE, 
+        Partner,
+        on_delete=models.CASCADE,
         verbose_name="供应商",
         limit_choices_to=Q(partner_type='SUPPLIER') | Q(partner_type='BOTH')
     )

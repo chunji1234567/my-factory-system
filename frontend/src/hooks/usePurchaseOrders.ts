@@ -54,6 +54,8 @@ export interface PurchaseOrderResponse {
   is_archived?: boolean;
   archived_at?: string | null;
   archived_by?: string;
+  /** 2026-06-19：供应商自家系统里的订单号（可空），同 SalesOrderResponse。 */
+  partner_order_no?: string;
 }
 
 export interface PurchaseOrdersFilters {

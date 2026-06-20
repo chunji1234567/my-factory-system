@@ -86,6 +86,8 @@ interface OrderFormState {
   expectedArrivalDate: string;
   /** 采购单允许通用 PATCH 改 status（与销售不同——见模块顶 docstring）。 */
   status: string;
+  /** 2026-06-19：供应商订单号，可空。详见 PurchaseOrderResponse.partner_order_no 文档。 */
+  partnerOrderNo: string;
   items: OrderItemDraft[];
 }
 
@@ -111,6 +113,7 @@ export default function PurchasePanel({
     supplierId: null,
     expectedArrivalDate: '',
     status: 'ORDERED',
+    partnerOrderNo: '',
     items: [],
   });
   const [isSaving, setIsSaving] = useState(false);
@@ -210,6 +213,7 @@ export default function PurchasePanel({
       supplierId: null,
       expectedArrivalDate: '',
       status: 'ORDERED',
+      partnerOrderNo: '',
       items: [
         { id: null, category: '', product: '', price: '', quantity: '' },
       ],
@@ -223,6 +227,7 @@ export default function PurchasePanel({
       supplierId: Number(order.partner) || null,
       expectedArrivalDate: order.expected_arrival_date || '',
       status: order.status,
+      partnerOrderNo: order.partner_order_no || '',
       items: order.items.map((i: any) => ({
         id: i.id,
         category: String(i.product_detail?.category_detail?.id || ''),
@@ -262,17 +267,22 @@ export default function PurchasePanel({
       const expected = form.expectedArrivalDate.trim() || null;
 
       if (modal.mode === 'create') {
+        // 2026-06-19：供应商订单号
+        const partnerOrderNo = form.partnerOrderNo.trim();
         await api.createPurchaseOrder({
           partner: sId,
           items_payload: itemsPayload,
           expected_arrival_date: expected,
+          partner_order_no: partnerOrderNo,
         });
       } else {
+        const partnerOrderNo = form.partnerOrderNo.trim();
         await api.updatePurchaseOrder(modal.draftId!, {
           partner: sId,
           status: form.status,
           items_payload: itemsPayload,
           expected_arrival_date: expected,
+          partner_order_no: partnerOrderNo,
         });
       }
       setModal({ ...modal, open: false });
@@ -330,6 +340,24 @@ export default function PurchasePanel({
   const deletingOrder = deleteConfirm.orderId
     ? ordersQuery.data.find((o) => o.id === deleteConfirm.orderId) ?? null
     : null;
+
+  /** 2026-06-19：下载采购订单确认书 PDF（同 SalesOrdersPanel）。 */
+  const handleDownloadPdf = async (orderId: number) => {
+    try {
+      const { blob, filename } = await api.downloadPurchaseOrderPdf(orderId);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success('PDF 下载完成');
+    } catch (e: any) {
+      toast.error(`下载失败：${e?.message ?? '未知错误'}`);
+    }
+  };
 
   // ----- 归档机制（2026-06-19）：confirm 走 ConfirmDialog primitive ---------
 
@@ -468,7 +496,12 @@ export default function PurchasePanel({
               <OrderListRow
                 key={order.id}
                 title={order.partner_name || `供应商#${order.partner}`}
-                subtitle={order.order_no}
+                // 2026-06-19：供应商单号优先，内部单号灰显；空则只显示内部单号
+                subtitle={
+                  order.partner_order_no
+                    ? `${order.partner_order_no}  ·  ${order.order_no}`
+                    : order.order_no
+                }
                 dueDate={order.expected_arrival_date}
                 statusLabel={statusInfo.label}
                 statusTone={statusInfo.tone}
@@ -480,23 +513,41 @@ export default function PurchasePanel({
                 onToggleExpand={() => setExpandedId(expanded ? null : order.id)}
                 expandedContent={
                   <div>
-                    {order.is_archived && isManager && (
-                      <div className="px-5 pt-3 pb-1 flex items-center justify-between gap-3 border-b border-line">
-                        <p className="text-micro text-ink-faint">
-                          已归档 · {order.archived_at?.slice(0, 10) ?? '未知日期'}
-                          {order.archived_by ? ` · 操作员 ${order.archived_by}` : ''}
-                        </p>
+                    {/* 2026-06-19：操作条——下载 PDF + 取消归档（如有）。
+                        同 SalesOrdersPanel 处理 */}
+                    <div className="px-5 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-line">
+                      <p className="text-micro text-ink-faint">
+                        {order.is_archived && (
+                          <>
+                            已归档 · {order.archived_at?.slice(0, 10) ?? '未知日期'}
+                            {order.archived_by ? ` · 操作员 ${order.archived_by}` : ''}
+                          </>
+                        )}
+                      </p>
+                      <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => openUnarchiveConfirm(order.id, order.order_no)}
+                          onClick={() => handleDownloadPdf(order.id)}
                           className="rounded-pill border border-line-strong text-ink-body px-3 py-1
                                      text-micro font-bold hover:bg-surface hover:border-line-focus
                                      transition-all whitespace-nowrap"
+                          title="下载采购订单确认书 PDF（给供应商签字）"
                         >
-                          取消归档
+                          ⬇ 下载采购单
                         </button>
+                        {order.is_archived && isManager && (
+                          <button
+                            type="button"
+                            onClick={() => openUnarchiveConfirm(order.id, order.order_no)}
+                            className="rounded-pill border border-line-strong text-ink-body px-3 py-1
+                                       text-micro font-bold hover:bg-surface hover:border-line-focus
+                                       transition-all whitespace-nowrap"
+                          >
+                            取消归档
+                          </button>
+                        )}
                       </div>
-                    )}
+                    </div>
                     <OrderDetailsView
                       mode="purchase"
                       items={order.items}
@@ -575,6 +626,22 @@ export default function PurchasePanel({
                   </div>
                 )}
               </div>
+            </div>
+            {/* 2026-06-19：供应商订单号 */}
+            <div className="mt-3 space-y-1">
+              <span className={FIELD_LABEL_CLS}>供应商订单号（可选）</span>
+              <input
+                type="text"
+                value={form.partnerOrderNo}
+                onChange={(e) => setForm({ ...form, partnerOrderNo: e.target.value })}
+                placeholder="供应商系统里的订单编号。可空。"
+                className="w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none
+                           focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors"
+                maxLength={100}
+              />
+              <p className="text-micro text-ink-faint">
+                若填写，收货 / PDF 都优先用此单号；空则用我们的内部单号
+              </p>
             </div>
             {/* 状态编辑（采购允许通用 PATCH 改状态，仅在 edit 模式显示） */}
             {modal.mode === 'edit' && (

@@ -78,6 +78,10 @@ export interface SalesOrderResponse {
   is_archived?: boolean;
   archived_at?: string | null;
   archived_by?: string;
+  /** 2026-06-19：客户自家系统里的订单号（可空）。业务约定：
+   *    UI 列表/排产/发货：有就优先显示，无则回退 order_no
+   *    PDF 导出：只显示这个字段，空则不显示任何订单号 */
+  partner_order_no?: string;
 }
 
 export interface SalesOrdersFilters {

@@ -138,6 +138,8 @@ class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             # 2026-06-19 归档机制：三件套都只读，通过 .../archive/ .../unarchive/
             # action 改变，不走通用 PATCH（详见 docs/PRD.md §9.4）。
             'is_archived', 'archived_at', 'archived_by',
+            # 2026-06-19：供应商订单号——可空，PDF 导出时优先用这个
+            'partner_order_no',
         ]
         # total_amount 是 signal 维护的派生字段——绝对不接受客户端覆盖
         # （详见 docs/PRD.md §4.4 与 signals.sync_purchase_order_ledger 注释）。
@@ -148,6 +150,7 @@ class PurchaseOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             'order_no': {'required': False, 'allow_blank': True},
             'operator': {'required': False, 'allow_blank': True},
             'expected_arrival_date': {'required': False, 'allow_null': True},
+            'partner_order_no': {'required': False, 'allow_blank': True},
         }
 
     def get_received_quantity(self, obj):
@@ -430,6 +433,8 @@ class SalesOrderListSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             'created_at', 'operator', 'items',
             'expected_delivery_date',
             'is_archived', 'archived_at', 'archived_by',
+            # 2026-06-19：客户订单号——前端列表卡 + 排产/发货优先显示这个
+            'partner_order_no',
         ]
         read_only_fields = fields  # 全部只读——list 不接受写
 
@@ -451,6 +456,8 @@ class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             # 2026-06-19 归档机制：三件套都只读，通过 .../archive/ .../unarchive/
             # action 改变，不走通用 PATCH（详见 docs/PRD.md §9.4）。
             'is_archived', 'archived_at', 'archived_by',
+            # 2026-06-19：客户订单号——可空，PDF 导出时优先用这个
+            'partner_order_no',
         ]
         # total_amount 是 signal 维护的派生字段——绝对不接受客户端覆盖
         # （详见 docs/PRD.md §4.4 与 signals.sync_sales_order_ledger 注释）。
@@ -461,6 +468,7 @@ class SalesOrderSerializer(MonetaryMaskMixin, serializers.ModelSerializer):
             'order_no': {'required': False, 'allow_blank': True},
             'operator': {'required': False, 'allow_blank': True},
             'expected_delivery_date': {'required': False, 'allow_null': True},
+            'partner_order_no': {'required': False, 'allow_blank': True},
         }
 
     def create(self, validated_data):
@@ -555,12 +563,15 @@ class ShippingLogSerializer(serializers.ModelSerializer):
     partner_name = serializers.CharField(source='sales_item.order.partner.name', read_only=True)
     partner_id = serializers.IntegerField(source='sales_item.order.partner_id', read_only=True)
     order_no = serializers.CharField(source='sales_item.order.order_no', read_only=True)
+    # 2026-06-19：暴露 partner_order_no 给前端做"优先显示客户单号"逻辑
+    partner_order_no = serializers.CharField(source='sales_item.order.partner_order_no', read_only=True)
 
     class Meta:
         model = ShippingLog
         fields = [
             'id', 'sales_item', 'sales_item_detail', 'quantity_shipped', 'tracking_no',
-            'operator', 'shipped_at', 'partner_name', 'partner_id', 'order_no'
+            'operator', 'shipped_at', 'partner_name', 'partner_id',
+            'order_no', 'partner_order_no',
         ]
         read_only_fields = ['shipped_at']
         extra_kwargs = {'operator': {'required': False}}

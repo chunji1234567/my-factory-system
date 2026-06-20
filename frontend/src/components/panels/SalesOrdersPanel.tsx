@@ -87,6 +87,8 @@ interface OrderFormState {
   customerId: number | null;
   /** ISO "YYYY-MM-DD" 或空串。后端可接受 null。 */
   expectedDeliveryDate: string;
+  /** 2026-06-19：客户订单号，可空。详见 SalesOrderResponse.partner_order_no 文档。 */
+  partnerOrderNo: string;
   items: OrderItemDraft[];
 }
 
@@ -111,6 +113,7 @@ export default function SalesOrdersPanel({
     customerField: '',
     customerId: null,
     expectedDeliveryDate: '',
+    partnerOrderNo: '',
     items: [],
   });
   const [isSaving, setIsSaving] = useState(false);
@@ -220,6 +223,7 @@ export default function SalesOrdersPanel({
       customerField: '',
       customerId: null,
       expectedDeliveryDate: '',
+      partnerOrderNo: '',
       items: [
         {
           id: null,
@@ -241,6 +245,7 @@ export default function SalesOrdersPanel({
       customerField: formatPartner(order.partner_name, order.partner),
       customerId: Number(order.partner) || null,
       expectedDeliveryDate: order.expected_delivery_date || '',
+      partnerOrderNo: order.partner_order_no || '',
       items: order.items.map((i: any) => ({
         id: i.id,
         product: i.product ? String(i.product) : '',
@@ -289,11 +294,15 @@ export default function SalesOrdersPanel({
       // expected_delivery_date：空串转 null（后端 DateField 可空）。
       const expected = form.expectedDeliveryDate.trim() || null;
 
+      // 2026-06-19：客户订单号 trim 后传——空串后端会存空字符串（DB 列默认 ''）
+      const partnerOrderNo = form.partnerOrderNo.trim();
+
       if (modal.mode === 'create') {
         await api.createSalesOrder({
           partner: cId,
           items_payload: itemsPayload,
           expected_delivery_date: expected,
+          partner_order_no: partnerOrderNo,
         });
       } else {
         // 编辑走通用 PATCH，**禁止携带 status**——状态推进走专用 endpoint。
@@ -301,6 +310,7 @@ export default function SalesOrdersPanel({
           partner: cId,
           items_payload: itemsPayload,
           expected_delivery_date: expected,
+          partner_order_no: partnerOrderNo,
         });
       }
 
@@ -376,6 +386,26 @@ export default function SalesOrdersPanel({
   const deletingOrder = deleteConfirm.orderId
     ? ordersQuery.data.find((o) => o.id === deleteConfirm.orderId) ?? null
     : null;
+
+  /** 2026-06-19：下载销售订单确认书 PDF。
+   *  业务约定：PDF 内只显示客户单号；客户单号空时不显示订单号（详见 §9.4）。 */
+  const handleDownloadPdf = async (orderId: number) => {
+    try {
+      const { blob, filename } = await api.downloadSalesOrderPdf(orderId);
+      // 触发浏览器下载——创建临时 a 元素 + URL.createObjectURL
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success('PDF 下载完成');
+    } catch (e: any) {
+      toast.error(`下载失败：${e?.message ?? '未知错误'}`);
+    }
+  };
 
   /** 当前编辑中的订单（拿来判断 status，决定删除按钮是否禁用）。 */
   const editingOrder = modal.mode === 'edit' && modal.draftId
@@ -518,7 +548,12 @@ export default function SalesOrdersPanel({
               <OrderListRow
                 key={order.id}
                 title={order.partner_name || `客户#${order.partner}`}
-                subtitle={order.order_no}
+                // 2026-06-19：客户单号优先，内部单号灰显；空则只显示内部单号
+                subtitle={
+                  order.partner_order_no
+                    ? `${order.partner_order_no}  ·  ${order.order_no}`
+                    : order.order_no
+                }
                 dueDate={order.expected_delivery_date}
                 statusLabel={statusInfo.label}
                 statusTone={statusInfo.tone}
@@ -530,23 +565,41 @@ export default function SalesOrdersPanel({
                 onToggleExpand={() => setExpandedId(expanded ? null : order.id)}
                 expandedContent={
                   <div>
-                    {order.is_archived && isManager && (
-                      <div className="px-5 pt-3 pb-1 flex items-center justify-between gap-3 border-b border-line">
-                        <p className="text-micro text-ink-faint">
-                          已归档 · {order.archived_at?.slice(0, 10) ?? '未知日期'}
-                          {order.archived_by ? ` · 操作员 ${order.archived_by}` : ''}
-                        </p>
+                    {/* 2026-06-19：操作条——下载 PDF + 取消归档（如有）。
+                        manager 可见的快捷操作，避免需要 Modal */}
+                    <div className="px-5 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-line">
+                      <p className="text-micro text-ink-faint">
+                        {order.is_archived && (
+                          <>
+                            已归档 · {order.archived_at?.slice(0, 10) ?? '未知日期'}
+                            {order.archived_by ? ` · 操作员 ${order.archived_by}` : ''}
+                          </>
+                        )}
+                      </p>
+                      <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => openUnarchiveConfirm(order.id, order.order_no)}
+                          onClick={() => handleDownloadPdf(order.id)}
                           className="rounded-pill border border-line-strong text-ink-body px-3 py-1
                                      text-micro font-bold hover:bg-surface hover:border-line-focus
                                      transition-all whitespace-nowrap"
+                          title="下载销售订单确认书 PDF（给客户签字）"
                         >
-                          取消归档
+                          ⬇ 下载销售单
                         </button>
+                        {order.is_archived && isManager && (
+                          <button
+                            type="button"
+                            onClick={() => openUnarchiveConfirm(order.id, order.order_no)}
+                            className="rounded-pill border border-line-strong text-ink-body px-3 py-1
+                                       text-micro font-bold hover:bg-surface hover:border-line-focus
+                                       transition-all whitespace-nowrap"
+                          >
+                            取消归档
+                          </button>
+                        )}
                       </div>
-                    )}
+                    </div>
                     <OrderDetailsView
                       mode="sales"
                       items={order.items}
@@ -625,6 +678,23 @@ export default function SalesOrdersPanel({
                   </div>
                 )}
               </div>
+            </div>
+            {/* 2026-06-19：客户订单号输入框——可空。
+                有就在排产/发货/PDF 中优先显示，空则回退我们的内部单号。 */}
+            <div className="mt-3 space-y-1">
+              <span className={FIELD_LABEL_CLS}>客户订单号（可选）</span>
+              <input
+                type="text"
+                value={form.partnerOrderNo}
+                onChange={(e) => setForm({ ...form, partnerOrderNo: e.target.value })}
+                placeholder="客户系统里的订单编号，如 PO-2026-001。可空。"
+                className="w-full rounded-input border border-line bg-surface px-3 py-2 text-body outline-none
+                           focus:border-line-focus focus:ring-2 focus:ring-primary/5 transition-colors"
+                maxLength={100}
+              />
+              <p className="text-micro text-ink-faint">
+                若填写，排产 / 发货 / PDF 都优先用此单号；空则用我们的内部单号
+              </p>
             </div>
           </Section>
           <Section title="② 订单明细">

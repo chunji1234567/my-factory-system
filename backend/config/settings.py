@@ -171,6 +171,13 @@ else:
     raw_cors = os.environ.get('DJANGO_CORS_ALLOWED_ORIGINS', '')
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in raw_cors.split(',') if origin.strip()]
 
+# 2026-06-19：暴露 Content-Disposition 给 JS 读取——否则浏览器默认只让 JS 看到
+# 6 个 "CORS-safelisted" 响应头，Content-Disposition 不在其中。
+# 影响：前端订单 PDF 下载读不到后端拼好的文件名（带合作方名 + 单号），
+# 只能 fallback 到 "销售订单.pdf" / "采购订单.pdf" 这种通用名。
+# 同理也覆盖财务台账 CSV 导出的中文文件名。
+CORS_EXPOSE_HEADERS = ['Content-Disposition']
+
 raw_csrf = os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '')
 if raw_csrf:
     CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in raw_csrf.split(',') if origin.strip()]

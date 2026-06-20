@@ -131,9 +131,11 @@ function PendingTab() {
     for (const order of ordersQuery.data) {
       if (order.status === 'COMPLETED') continue;
       for (const item of order.items) {
+        // 2026-06-19：发货中心优先显示客户订单号（同 ProductionPanel）。
+        const displayOrderNo = (order as any).partner_order_no || order.order_no;
         out.push({
           order_id: order.id,
-          order_no: order.order_no,
+          order_no: displayOrderNo,
           partner_name: order.partner_name ?? '—',
           item_id: item.id,
           custom_product_name: item.custom_product_name,
@@ -598,7 +600,7 @@ function HistoryTab() {
       <Card flat tone="subtle" padding="tight">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-caption text-ink-muted">
-            勾选历史流水可下载 PDF 发货单（A4，司机带去客户签收）。同客户的多条自动合并成一页。
+            勾选历史流水可下载 PDF 发货单（A4）。同客户的多条自动合并成一页。
           </div>
           <ActionBar align="end" className="shrink-0">
             <ActionBar.GhostButton onClick={clearSelection} disabled={selectedIds.size === 0}>
@@ -664,9 +666,10 @@ function HistoryTab() {
                           </p>
                           <div className="flex items-center gap-2 flex-wrap mt-1 text-caption text-ink-muted">
                             {log.partner_name && <span>{log.partner_name}</span>}
-                            {log.order_no && <>
+                            {/* 2026-06-19：优先显示 partner_order_no，回退 order_no */}
+                            {((log as any).partner_order_no || log.order_no) && <>
                               <span className="text-ink-faint">·</span>
-                              <span className="font-mono">{log.order_no}</span>
+                              <span className="font-mono">{(log as any).partner_order_no || log.order_no}</span>
                             </>}
                             <span className="text-ink-faint">·</span>
                             <span>{log.operator ?? '系统'}</span>
