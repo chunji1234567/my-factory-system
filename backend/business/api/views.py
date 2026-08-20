@@ -918,16 +918,35 @@ class FinancePartnerLedgerExportView(APIView):
         title_cell.fill = PatternFill('solid', fgColor='F1F5F9')
         ws.row_dimensions[1].height = 28
 
-        # 第 2 行：表头
+        # 第 2 行：当前余额（2026-06-20 新增，方便对账一眼看到）
+        # 应付/应收标签按 finance_type 区分：
+        #   receivable = 客户，正余额 = 客户欠我们
+        #   payable   = 供应商，正余额 = 我们欠供应商
+        balance = partner.balance or Decimal('0')
+        balance_label = '应收余额' if finance_type == 'receivable' else '应付余额'
+        balance_text = f'{balance_label}：¥ {balance:,.2f}'
+        ws.cell(row=2, column=1, value=balance_text)
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_cols)
+        bal_cell = ws.cell(row=2, column=1)
+        bal_cell.font = Font(
+            name='Microsoft YaHei', size=12, bold=True,
+            # 正余额（对方欠我们 / 我们欠对方）用红色突出；零和负值用绿色
+            color='DC2626' if balance > 0 else ('16A34A' if balance < 0 else '475569'),
+        )
+        bal_cell.alignment = Alignment(horizontal='right', vertical='center')
+        bal_cell.fill = PatternFill('solid', fgColor='FEF3C7')  # 淡黄提示条
+        ws.row_dimensions[2].height = 22
+
+        # 第 3 行：表头
         header_font = Font(name='Microsoft YaHei', bold=True, color='FFFFFF')
         header_fill = PatternFill('solid', fgColor='475569')
         header_align = Alignment(horizontal='center', vertical='center')
         for col_idx, label in enumerate(headers, start=1):
-            cell = ws.cell(row=2, column=col_idx, value=label)
+            cell = ws.cell(row=3, column=col_idx, value=label)
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = header_align
-        ws.row_dimensions[2].height = 22
+        ws.row_dimensions[3].height = 22
 
         # 数据行
         body_font = Font(name='Microsoft YaHei', size=11)
@@ -937,7 +956,7 @@ class FinancePartnerLedgerExportView(APIView):
         money_fmt = '#,##0.00'
         qty_fmt = '0.##'
 
-        row = 3
+        row = 4  # 2026-06-20：row1=公司名，row2=余额行，row3=表头，数据从 row4 开始
         for entry in entries:
             if summary_mode:
                 created_at = entry['created_at'].strftime('%Y-%m-%d')
@@ -996,7 +1015,7 @@ class FinancePartnerLedgerExportView(APIView):
                     max_len = width
             ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 60)
 
-        ws.freeze_panes = 'A3'
+        ws.freeze_panes = 'A4'  # 2026-06-20：冻结 1-3 行（公司名 + 余额 + 表头）
 
         # 输出 + 文件名（带日期区间）
         if ledger_from and ledger_to:

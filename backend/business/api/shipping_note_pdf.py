@@ -259,7 +259,9 @@ def _build_partner_note(*, company_name, partner_label, rows, today_str, frame_w
 
     # 抬头：公司名 + 发货单标题
     elements.append(Paragraph(company_name, _COMPANY_STYLE))
-    elements.append(Paragraph('发&nbsp;&nbsp;货&nbsp;&nbsp;单', _TITLE_STYLE))
+    # 2026-06-19：不用 &nbsp;——某些服务器字体（fallback 到 STSong-Light CID）
+    # 会把 U+00A0 渲染成小箭头符号。直接连写 "发货单" 最稳。
+    elements.append(Paragraph('发货单', _TITLE_STYLE))
 
     # 客户 + 日期 row
     meta_row = Table(

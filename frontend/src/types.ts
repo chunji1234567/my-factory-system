@@ -10,13 +10,14 @@ export type PanelRole = 'manager' | 'warehouse' | 'shipper';
  *
  * 组内顺序遵循"上游到下游"业务时序，详见 panelConfig 各项的 group + title 顺序。
  */
-export type PanelGroup = 'daily' | 'orders' | 'warehouse' | 'setup';
+export type PanelGroup = 'daily' | 'orders' | 'warehouse' | 'setup' | 'analytics';
 
 export const panelGroupConfig: Record<PanelGroup, { title: string }> = {
   daily: { title: '日常作业' },
   orders: { title: '订单管理' },
   warehouse: { title: '仓库与资产' },
   setup: { title: '合作方与配置' },
+  analytics: { title: '经营分析' },
 };
 
 /** 侧边栏分组的显示顺序——key 顺序决定 UI 渲染顺序。 */
@@ -25,6 +26,7 @@ export const panelGroupOrder: readonly PanelGroup[] = [
   'orders',
   'warehouse',
   'setup',
+  'analytics',
 ] as const;
 
 export const panelConfig = {
@@ -92,6 +94,14 @@ export const panelConfig = {
     description: '维护 PCB 方案的物料配方（排产展开扣料）',
     roles: ['manager'] satisfies PanelRole[],
     group: 'setup' as PanelGroup,
+  },
+
+  // —— 经营分析（2026-06-20 新增，manager only）——
+  analytics: {
+    title: '经营分析',
+    description: '销售/采购趋势、排产吞吐、物料消耗——按时段自定义',
+    roles: ['manager'] satisfies PanelRole[],
+    group: 'analytics' as PanelGroup,
   },
 } as const;
 

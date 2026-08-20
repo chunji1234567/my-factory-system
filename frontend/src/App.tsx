@@ -8,6 +8,7 @@ import PartnerManagementPanel from './components/panels/PartnerManagementPanel';
 import SelfMadeGalleryPanel from './components/panels/SelfMadeGalleryPanel';
 import ProductionPanel from './components/panels/ProductionPanel';
 import PcbPlanPanel from './components/panels/PcbPlanPanel';
+import AnalyticsPanel from './components/panels/AnalyticsPanel';
 import LoginForm from './components/LoginForm';
 import { useAuth } from './context/AuthContext';
 import { useProducts } from './hooks/useProducts';
@@ -254,6 +255,11 @@ function App() {
              方案被销售明细 / 排产明细引用，排产 EXECUTED 时按方案展开扣减原材料。
              详见 docs/PRD.md §3.2 §4.5 §9.4 changelog 2026-05-21（PCB 方案改造）。 */
           <PcbPlanPanel />
+        )}
+        {activePanel === 'analytics' && (
+          /* 2026-06-20：经营分析中心（manager only）——销售/采购趋势、排产吞吐、
+             物料消耗汇总。详见 docs/PRD.md §9.4 changelog + AnalyticsPanel.tsx。 */
+          <AnalyticsPanel />
         )}
         </div>
       </main>

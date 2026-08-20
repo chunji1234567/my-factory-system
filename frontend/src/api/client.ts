@@ -148,6 +148,14 @@ export function toQueryString(params: object | undefined | null): string {
   return s ? `?${s}` : '';
 }
 
+/** 2026-08-21：经营分析 material-consumption / material-demand 返回的分类下拉选项。 */
+export interface AnalyticsCategoryOption {
+  id: number;
+  name: string;
+  category_type: string;
+  category_type_display: string;
+}
+
 /** DRF PageNumberPagination 的标准响应结构。 */
 export interface PaginatedResponse<T> {
   count: number;
@@ -680,6 +688,100 @@ export const api = {
   /** 2026-06-19：下载单张采购订单确认书 PDF（同上口径）。 */
   async downloadPurchaseOrderPdf(orderId: number): Promise<{ blob: Blob; filename: string }> {
     return _downloadOrderPdf(`/api/business/purchase-orders/${orderId}/pdf/`, '采购订单');
+  },
+
+  // ----- 经营分析（2026-06-20，manager only；详见 analytics_views.py）-----
+  /** 销售 vs 采购按时间分组的趋势数据。 */
+  // 见下方 AnalyticsCategoryOption：物料相关 API 返回的分类下拉选项。
+  getAnalyticsTrend(params: { from: string; to: string; group_by: 'day' | 'week' | 'month' }) {
+    return apiFetch<{
+      from: string;
+      to: string;
+      group_by: string;
+      series: Array<{ period: string; period_date: string; sales: number; purchase: number }>;
+      totals: { sales: number; purchase: number };
+    }>(`/api/business/analytics/trend/${toQueryString(params)}`);
+  },
+  /** 物料消耗表（"实际消耗"口径，来自 PRODUCE_CONSUME）：数量 + 加权单价 + 总价值 + 日均。
+   *  2026-08-21：加 category 过滤参数 + 返回 categories 下拉选项与 category_id。 */
+  getAnalyticsMaterialConsumption(params: { from: string; to: string; category?: number | null }) {
+    const qs = toQueryString(params);
+    return apiFetch<{
+      from: string;
+      to: string;
+      category: number | null;
+      categories: AnalyticsCategoryOption[];
+      rows: Array<{
+        product_id: number;
+        model_name: string;
+        internal_code: string;
+        category: string;
+        category_id: number | null;
+        quantity: number;
+        avg_price: number;
+        total_value: number;
+        daily_avg: number;
+      }>;
+      summary: { total_value: number; total_quantity: number; material_count: number };
+    }>(`/api/business/analytics/material-consumption/${qs}`);
+  },
+  /** 2026-08-21：方案销售——每个 PCB 方案在期间的销售数量 + 金额（来自 SalesOrderItem）。 */
+  getAnalyticsPlanSales(params: { from: string; to: string }) {
+    return apiFetch<{
+      from: string;
+      to: string;
+      rows: Array<{
+        plan_id: number;
+        plan_name: string;
+        plan_code: string;
+        is_active: boolean;
+        quantity: number;
+        revenue: number;
+        avg_price: number;
+      }>;
+      summary: { plan_count: number; total_quantity: number; total_revenue: number };
+    }>(`/api/business/analytics/plan-sales/${toQueryString(params)}`);
+  },
+  /** 2026-08-21：订单需求侧的物料展开（外壳/线材 1:1，方案 × quantity_per_unit）。 */
+  getAnalyticsMaterialDemand(params: { from: string; to: string; category?: number | null }) {
+    const qs = toQueryString(params);
+    return apiFetch<{
+      from: string;
+      to: string;
+      category: number | null;
+      categories: AnalyticsCategoryOption[];
+      rows: Array<{
+        product_id: number;
+        model_name: string;
+        internal_code: string;
+        category: string;
+        category_id: number | null;
+        sources: Array<'shell' | 'cable' | 'plan'>;
+        quantity: number;
+        avg_price: number;
+        total_value: number;
+      }>;
+      summary: { material_count: number; total_quantity: number; total_value: number };
+    }>(`/api/business/analytics/material-demand/${qs}`);
+  },
+  /** 排产吞吐量按时间分组。 */
+  getAnalyticsProductionThroughput(params: { from: string; to: string; group_by: 'day' | 'week' | 'month' }) {
+    return apiFetch<{
+      from: string;
+      to: string;
+      group_by: string;
+      series: Array<{ period: string; period_date: string; quantity: number }>;
+      total: number;
+    }>(`/api/business/analytics/production-throughput/${toQueryString(params)}`);
+  },
+  /** 物料消耗 xlsx 导出（2026-08-21 加 category 过滤）。 */
+  async downloadMaterialConsumptionXlsx(
+    params: { from: string; to: string; category?: number | null },
+  ): Promise<{ blob: Blob; filename: string }> {
+    return _downloadOrderPdf(
+      `/api/business/analytics/material-consumption/export/${toQueryString(params)}`,
+      '物料消耗',
+    );
   },
   createReceivingLog(payload: { purchase_item: number; quantity_received: number; remark?: string }) {
     return apiFetch(`/api/business/receiving-logs/`, {
