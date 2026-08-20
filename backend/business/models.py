@@ -180,15 +180,26 @@ class ShippingLog(models.Model):
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         if is_new:
-            self.clean()
-        # 发货只同步事件，不再联动库存
-        OrderEvent.objects.create(
-            order=self.sales_item.order,
-            event_type='SHIPPING',
-            content=f"已发货 [{self.sales_item.custom_product_name}] {self.quantity_shipped} 个。单号：{self.tracking_no}",
-            operator=self.operator
-        )
-        super().save(*args, **kwargs)
+            # 2026-06-19 并发加固：select_for_update 锁住 sales_item 直到事务
+            # 提交，防止两个 shipper 同时发货同一明细导致过发货（详见 §9.4）。
+            # 举例：明细 quantity=100 已发 60，两个 shipper 各查 available=40
+            # 各发 40，若无锁两条都通过 → 实际 shipped=140 > 100。
+            # 加锁后：后来的 shipper SELECT 阻塞等待，看到 shipped=100 时 clean() 拒绝。
+            with transaction.atomic():
+                if self.sales_item_id:
+                    SalesOrderItem.objects.select_for_update().get(pk=self.sales_item_id)
+                self.clean()
+                # 发货只同步事件，不再联动库存
+                OrderEvent.objects.create(
+                    order=self.sales_item.order,
+                    event_type='SHIPPING',
+                    content=f"已发货 [{self.sales_item.custom_product_name}] {self.quantity_shipped} 个。单号：{self.tracking_no}",
+                    operator=self.operator
+                )
+                super().save(*args, **kwargs)
+        else:
+            # 老记录 update（理论不该发生——ViewSet 禁 update）：直接 super
+            super().save(*args, **kwargs)
 
 # --- 2. 采购系统 (Purchase) ---
 
@@ -581,5 +592,15 @@ class ProductionRecord(models.Model):
 
     def save(self, *args, **kwargs):
         if self.pk is None:
-            self.clean()
-        super().save(*args, **kwargs)
+            # 2026-06-19 并发加固：select_for_update 锁住 sales_item 直到事务
+            # 提交，防止两个 manager 同时排产同一明细导致过排产（详见 §9.4）。
+            # 举例：明细 quantity=100 已排 40，两人各查 already_produced=40
+            # 各排 60，若无锁两条都通过 → 实际 produced=160 > 100。
+            # 加锁后：后者 SELECT 阻塞，看到 already_produced=100 时 clean() 拒绝。
+            with transaction.atomic():
+                if self.sales_item_id:
+                    SalesOrderItem.objects.select_for_update().get(pk=self.sales_item_id)
+                self.clean()
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
