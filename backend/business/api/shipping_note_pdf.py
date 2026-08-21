@@ -42,6 +42,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    FrameBreak,
     KeepTogether,
     PageBreak,
     PageTemplate,
@@ -262,7 +263,7 @@ def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
         # 客户之间强制分页，绝对避免不同客户共享一张 A4。
         if i > 0:
             story.append(PageBreak())
-        # 上联：客户联（交给客户）
+        # 上联：客户联（交给客户）—— 放入 top frame
         story.append(KeepTogether(_build_partner_note(
             company_name=company_name,
             partner_label=partner_label,
@@ -271,7 +272,11 @@ def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
             frame_width=frame_width,
             copy_label='客户联',
         )))
-        # 下联：回执联（签字后带回，作为送达凭证）
+        # 关键：FrameBreak 强制离开 top frame → 下一份从 bottom frame 开始。
+        # 没有这行的话，如果单据不高，两份都会挤在 top frame 里，
+        # 页中间的虚线就切不出正确的两联（这是 2026-08-21 用户反馈的 bug）。
+        story.append(FrameBreak())
+        # 下联：回执联（签字后带回，作为送达凭证）—— 放入 bottom frame
         story.append(KeepTogether(_build_partner_note(
             company_name=company_name,
             partner_label=partner_label,
