@@ -51,7 +51,11 @@ _FONT_CANDIDATES: list[tuple[str, int | None]] = [
     ('/System/Library/Fonts/PingFang.ttc', 2),
     ('/System/Library/Fonts/STHeiti Light.ttc', 0),
     ('/System/Library/Fonts/STHeiti Medium.ttc', 0),
-    ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 0),
+    # 2026-08-21：Noto Sans CJK 用 PostScript/CFF 轮廓，reportlab 加载会报
+    # "postscript outlines are not supported"——所以优先文泉驿系列（真 TTF）。
+    ('/usr/share/fonts/truetype/wqy/wqy-microhei.ttc', 0),
+    ('/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc', 0),
+    ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 0),  # CFF，兜底但基本失败
     ('/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf', None),
     ('/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc', 0),
     ('C:/Windows/Fonts/msyh.ttc', 0),

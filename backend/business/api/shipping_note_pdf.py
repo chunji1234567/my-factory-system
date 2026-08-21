@@ -43,6 +43,7 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
     KeepTogether,
+    PageBreak,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -63,8 +64,14 @@ _FONT_CANDIDATES: list[tuple[str, int | None]] = [
     ('/System/Library/Fonts/PingFang.ttc', 2),         # PingFang SC Regular (常用)
     ('/System/Library/Fonts/STHeiti Light.ttc', 0),    # 黑体细
     ('/System/Library/Fonts/STHeiti Medium.ttc', 0),
-    # Linux（Debian/Ubuntu: apt install fonts-noto-cjk）
-    ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 0),
+    # Linux（Debian/Ubuntu）
+    # 2026-08-21 修正：Noto Sans CJK 用 PostScript/CFF 轮廓，reportlab 的 TTFont
+    # 只支持 TrueType 轮廓，加载会报 "postscript outlines are not supported"。
+    # 所以优先文泉驿系列（真 TrueType）。Noto 保留作为兜底但基本不会成功。
+    #   服务器安装：sudo apt install fonts-wqy-microhei fonts-wqy-zenhei
+    ('/usr/share/fonts/truetype/wqy/wqy-microhei.ttc', 0),   # 文泉驿微米黑（首选）
+    ('/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc', 0),     # 文泉驿正黑
+    ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 0),  # CFF，reportlab 装不了
     ('/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf', None),
     ('/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc', 0),
     # Windows
@@ -157,13 +164,29 @@ _FOOTER_STYLE = ParagraphStyle(
     textColor=colors.HexColor('#64748b'),
     leading=11,
 )
+# 联次徽章：客户联 / 回执联（2026-08-21）
+_COPY_LABEL_STYLE = ParagraphStyle(
+    name='CopyLabel',
+    fontName=_CN_FONT,
+    fontSize=11,
+    alignment=2,          # right
+    leading=14,
+)
 
 
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
 def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
-    """把一组 ShippingLog 渲染成发货单 PDF（2 客户/A4，详见模块顶 docstring）。
+    """把一组 ShippingLog 渲染成发货单 PDF。
+
+    2026-08-21 改版：**一客户一 A4，同客户上下打两份**
+      - 上联 = **客户联**（交给客户）
+      - 下联 = **回执联**（客户签字后带回作为送达凭证）
+      - 中间虚线可裁开
+
+    这样不同客户绝对不会共享一张 A4，避免"客户 A 和客户 B 出现在同一张纸上、
+    剪开还得再分"的混乱。缺点是每客户至少一张 A4，纸张略费——但流程清晰。
 
     分组规则：按 (partner_id, partner_name) 分组——同客户的多笔 ShippingLog
     合并成同一张发货单。
@@ -174,7 +197,7 @@ def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
 
     buffer = io.BytesIO()
 
-    # 自定义 2-frame 布局：上半 A4 + 下半 A4，各放一张发货单
+    # 2-frame 布局：上半 = 客户联，下半 = 回执联
     page_width, page_height = A4
     h_margin = 12 * mm
     v_margin = 8 * mm
@@ -215,7 +238,7 @@ def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
         canvas.line(h_margin, y, page_width - h_margin, y)
         canvas.setFont(_CN_FONT, 7)
         canvas.setFillColor(colors.HexColor('#94a3b8'))
-        canvas.drawCentredString(page_width / 2, y - 4, '— ✂ 沿虚线裁剪 —')
+        canvas.drawCentredString(page_width / 2, y - 4, '— ✂ 沿虚线裁开：上联客户联 / 下联回执联 —')
         canvas.restoreState()
 
     doc = BaseDocTemplate(
@@ -235,16 +258,27 @@ def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
     today_str = date.today().strftime('%Y-%m-%d')
 
     story = []
-    for partner_label, rows in grouped:
-        # KeepTogether 强制整张发货单作为一个不可分割块——要么完整放进 frame，
-        # 要么整个跳到下一个 frame（上半放不下就跳下半，下半放不下就跳下一页上半）。
-        # 这样不会出现"客户 A 的明细横跨两页"的丑陋情况。
+    for i, (partner_label, rows) in enumerate(grouped):
+        # 客户之间强制分页，绝对避免不同客户共享一张 A4。
+        if i > 0:
+            story.append(PageBreak())
+        # 上联：客户联（交给客户）
         story.append(KeepTogether(_build_partner_note(
             company_name=company_name,
             partner_label=partner_label,
             rows=rows,
             today_str=today_str,
             frame_width=frame_width,
+            copy_label='客户联',
+        )))
+        # 下联：回执联（签字后带回，作为送达凭证）
+        story.append(KeepTogether(_build_partner_note(
+            company_name=company_name,
+            partner_label=partner_label,
+            rows=rows,
+            today_str=today_str,
+            frame_width=frame_width,
+            copy_label='回执联',
         )))
 
     doc.build(story)
@@ -254,14 +288,35 @@ def generate_shipping_note_pdf(logs: Iterable[ShippingLog]) -> bytes:
 # ---------------------------------------------------------------------------
 # 单张发货单内容（不含外层 frame，调用方负责把它放进合适的 frame）
 # ---------------------------------------------------------------------------
-def _build_partner_note(*, company_name, partner_label, rows, today_str, frame_width):
+def _build_partner_note(*, company_name, partner_label, rows, today_str, frame_width, copy_label=''):
+    """渲染一份发货单内容。
+
+    :param copy_label: '客户联' / '回执联'——右上角显示，方便区分同一 A4 的上下两份。
+        为空则不显示（向后兼容）。
+    """
     elements = []
 
-    # 抬头：公司名 + 发货单标题
+    # 抬头：公司名 + 发货单标题；右上角联次标签
     elements.append(Paragraph(company_name, _COMPANY_STYLE))
-    # 2026-06-19：不用 &nbsp;——某些服务器字体（fallback 到 STSong-Light CID）
-    # 会把 U+00A0 渲染成小箭头符号。直接连写 "发货单" 最稳。
-    elements.append(Paragraph('发货单', _TITLE_STYLE))
+    # 标题行：左侧 "发货单"，右侧 联次徽章
+    title_row = Table(
+        [[
+            Paragraph('<font color="#475569">发货单</font>', _TITLE_STYLE),
+            Paragraph(
+                f'<font color="#dc2626"><b>[{_escape(copy_label)}]</b></font>' if copy_label else '',
+                _COPY_LABEL_STYLE,
+            ),
+        ]],
+        colWidths=[frame_width * 0.80, frame_width * 0.20],
+    )
+    title_row.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+    ]))
+    elements.append(title_row)
 
     # 客户 + 日期 row
     meta_row = Table(
