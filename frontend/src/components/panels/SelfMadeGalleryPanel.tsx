@@ -34,7 +34,8 @@ import {
  */
 
 const SELF_MADE_TYPES = ['SELF_MADE', 'CABLE'] as const;
-const PAGE_SIZE = 12;
+const PAGE_SIZE_OPTIONS = [12, 24, 48, 96] as const;
+const DEFAULT_PAGE_SIZE = 24;
 
 interface Props {
   products: ProductResponse[];
@@ -67,6 +68,7 @@ export default function SelfMadeGalleryPanel({
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>(''); // '' = 全部
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
 
   const [adjustProduct, setAdjustProduct] = useState<ProductResponse | null>(null);
   const [batchOpen, setBatchOpen] = useState(false);
@@ -122,12 +124,12 @@ export default function SelfMadeGalleryPanel({
     });
   }, [selfMadeProducts, search, categoryFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pagedProducts = useMemo(() => {
-    const start = (currentPage - 1) * PAGE_SIZE;
-    return filtered.slice(start, start + PAGE_SIZE);
-  }, [filtered, currentPage]);
+    const start = (currentPage - 1) * pageSize;
+    return filtered.slice(start, start + pageSize);
+  }, [filtered, currentPage, pageSize]);
 
   // 全部自产件 → AdjustableProduct（给批量 Modal 的可加列表用）
   const adjustablePool = useMemo(
@@ -230,9 +232,27 @@ export default function SelfMadeGalleryPanel({
 
       {!loading && !error && filtered.length > 0 && (
         <>
-          <p className="text-micro text-ink-faint">
-            共 {filtered.length} 件 · 第 {currentPage} / {totalPages} 页
-          </p>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-micro text-ink-faint">
+              共 {filtered.length} 件 · 第 {currentPage} / {totalPages} 页
+            </p>
+            <label className="flex items-center gap-2 text-caption text-ink-body">
+              每页显示
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setPage(1);
+                }}
+                className="rounded-input border border-line bg-surface px-2 py-1 text-caption outline-none
+                           focus:border-line-focus focus:ring-2 focus:ring-primary/5"
+              >
+                {PAGE_SIZE_OPTIONS.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </label>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {pagedProducts.map((product) => (
               <GalleryCard
@@ -243,7 +263,7 @@ export default function SelfMadeGalleryPanel({
               />
             ))}
           </div>
-          <Pagination page={currentPage} total={filtered.length} onPageChange={setPage} />
+          <Pagination page={currentPage} total={filtered.length} pageSize={pageSize} onPageChange={setPage} />
         </>
       )}
 
